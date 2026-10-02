@@ -1,0 +1,19 @@
+{
+  "name": "codingway-claude-mods",
+  "owner": {
+    "name": "Natsume777"
+  },
+  "description": "Claude Code mods by Natsume777",
+  "plugins": [
+    {
+      "name": "usage-band",
+      "source": "./plugins/usage-band",
+      "description": "Shows context, 5-hour and weekly limit usage in the band above the prompt"
+    },
+    {
+      "name": "ui-sampler",
+      "source": "./plugins/ui-sampler",
+      "description": "Tries each place a mod can draw: pane, toast, status, log, notice, dialog and the engine's own lines"
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+# Type declarations the engine writes for the running build
+plugins/*/.claude-plugin/types/
