@@ -4,12 +4,15 @@
 // finds the entry, the hook and the text on screen.
 
 export const PANE = 'ui-sampler'
+export const ELEMENTS_PANE = 'ui-sampler-elements'
 export const COMMAND = 'ui-sampler'
 
 /**
  * kind: 'render' (a ui.render site), 'api' (a $ method the pane calls), 'event' (a hook on
- * an engine event). toggleable sites can be switched off from the pane; an off site's hook
- * passes `next(e)` on unchanged.
+ * an engine event), 'element' (one sample in the element pane, elements.js; `element` names
+ * the entry of the surface's element table it draws). toggleable sites can be switched off
+ * from the pane; an off site's hook passes `next(e)` on unchanged, an off element sample is
+ * left out of the element pane's tree.
  */
 export const SITES = [
   {
@@ -49,6 +52,14 @@ export const SITES = [
     label: '[Pane]',
     kind: 'render',
     where: '$.ui.open で開く枠（いま見ているこのパネル）',
+    toggleable: false,
+    defaultOn: true,
+  },
+  {
+    id: 'ElementsPane',
+    label: '[ElementsPane]',
+    kind: 'render',
+    where: '2 つ目のパネル「[Pane] 部品の見本」（下のボタンで開く）。部品ごとの見本が並ぶ',
     toggleable: false,
     defaultOn: true,
   },
@@ -100,9 +111,99 @@ export const SITES = [
     toggleable: false,
     defaultOn: true,
   },
+  {
+    id: 'Pane/Text',
+    label: '[Pane/Text]',
+    kind: 'element',
+    element: 'Text',
+    where: 'Text: color（テーマ名と色コード）/ backgroundColor / bold / dimColor / italic / underline / strikethrough / inverse / wrap / hover',
+    toggleable: true,
+    defaultOn: true,
+  },
+  {
+    id: 'Pane/Box',
+    label: '[Pane/Box]',
+    kind: 'element',
+    element: 'Box',
+    where: 'Box: borderStyle / borderColor / borderDimColor / backgroundColor / padding / hover / hover.scope / position: absolute と display: none',
+    toggleable: true,
+    defaultOn: true,
+  },
+  {
+    id: 'Pane/Button',
+    label: '[Pane/Button]',
+    kind: 'element',
+    element: 'Button',
+    where: 'Button: 既定 / variant / plain / hotkey / dimColor / autoFocus / role: dismiss / hover',
+    toggleable: true,
+    defaultOn: true,
+  },
+  {
+    id: 'Pane/Button/action',
+    label: '[Pane/Button/action]',
+    kind: 'element',
+    element: 'Button',
+    where: 'Button の action（エンジンのキー操作 app:cycleDiffBase）。名前が通らないと見本ごと描かれないので別の切り替え',
+    toggleable: true,
+    defaultOn: true,
+  },
+  {
+    id: 'Pane/Input',
+    label: '[Pane/Input]',
+    kind: 'element',
+    element: 'Input',
+    where: 'Input: label / placeholder / submitLabel / value。打った字を下に写す',
+    toggleable: true,
+    defaultOn: true,
+  },
+  {
+    id: 'Pane/Select',
+    label: '[Pane/Select]',
+    kind: 'element',
+    element: 'Select',
+    where: 'Select: label / options（label あり・なし）/ value。選んだ値を下に写す',
+    toggleable: true,
+    defaultOn: true,
+  },
+  {
+    id: 'Pane/Link',
+    label: '[Pane/Link]',
+    kind: 'element',
+    element: 'Link',
+    where: 'Link: 文中（children）/ label / どちらもなし（URL がそのまま出る）/ http://localhost',
+    toggleable: true,
+    defaultOn: true,
+  },
+  {
+    id: 'Pane/Code',
+    label: '[Pane/Code]',
+    kind: 'element',
+    element: 'Code',
+    where: 'Code: language + startLine / path から言語を推測 / format: diff / wrap: truncate-end',
+    toggleable: true,
+    defaultOn: true,
+  },
+  {
+    id: 'Pane/Markdown',
+    label: '[Pane/Markdown]',
+    kind: 'element',
+    element: 'Markdown',
+    where: 'Markdown: 見出し・表・コード・リンク / dimColor / onLinkPress + pressableLinks',
+    toggleable: true,
+    defaultOn: true,
+  },
+  {
+    id: 'Pane/Svg',
+    label: '[Pane/Svg]',
+    kind: 'element',
+    element: 'Svg',
+    where: 'Svg: 画像として / width・height で縮める / isInteractive（:hover と動き）',
+    toggleable: true,
+    defaultOn: true,
+  },
 ]
 
-export const KIND_LABEL = { render: '描画', api: 'API', event: 'イベント' }
+export const KIND_LABEL = { render: '描画', api: 'API', event: 'イベント', element: '部品' }
 
 export function siteOf(id) {
   const site = SITES.find(one => one.id === id)

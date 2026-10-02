@@ -11,6 +11,12 @@ declare module 'claude-code' {
       toggles: StateFamily<boolean>
       /** Unset means 'hint'. */
       promptHintMode: UiSamplerPromptHintMode
+      /**
+       * What the element pane writes back under a sample, keyed by the sample's id in SITES
+       * (with a `:change` or `:submit` suffix for the Input's two lines): the last press,
+       * the typed text, the picked value. Unset means nothing happened yet.
+       */
+      echo: StateFamily<string>
     }
   }
 }

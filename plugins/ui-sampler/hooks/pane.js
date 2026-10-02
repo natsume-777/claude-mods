@@ -1,8 +1,8 @@
 // The pane /ui-sampler opens: where it is being drawn, then one entry per SITES row (what it
 // is, where it shows, its on/off switch, how often it was called), with buttons that call the
-// one-shot $ APIs.
+// one-shot $ APIs and open the element pane (elements.js).
 
-import { PANE, SITES, KIND_LABEL, toggleValue, noteCall, callSummary } from './sites.js'
+import { PANE, ELEMENTS_PANE, SITES, KIND_LABEL, toggleValue, noteCall, callSummary } from './sites.js'
 import { atom, read, update } from 'claude-code'
 
 // The state this file reads and writes (declared in types/index.d.ts): one switch per site id,
@@ -19,6 +19,7 @@ const keyOf = (prefix, id) => prefix + '-' + id.replace(/[^A-Za-z0-9_-]/g, '_')
 
 /** The one-shot APIs: the text of each one's button, by site id. runAction does the call. */
 const ACTION_BUTTONS = {
+  ElementsPane: '部品の見本を開く',
   '$.ui.status': 'ステータス行を書き換える',
   '$.ui.toast': 'トーストを出す',
   '$.ui.log': 'ログ行を出す',
@@ -30,6 +31,13 @@ const ACTION_BUTTONS = {
 // declared in this file, called by name.
 async function runAction($, id) {
   switch (id) {
+    // ===== [ElementsPane] $.ui.open({ id: 'ui-sampler-elements' }) =====
+    // A pane of its own, so a sample the surface refuses takes down that pane, not this one
+    case 'ElementsPane': {
+      const opened = await $.ui.open({ id: ELEMENTS_PANE, title: '[Pane] 部品の見本' })
+      return opened.isPlaced ? '開いた' : '開いたがまだ表示されていない: ' + opened.reason
+    }
+
     // ===== [$.ui.status] $.ui.status(text) =====
     case '$.ui.status': {
       statusPresses += 1
@@ -161,7 +169,8 @@ export function registerPane(on) {
             key: keyOf('run', site.id),
             label: actionButton,
             onPress: async press => {
-              noteCall(site.id, press.surface)
+              // A render site's count is its drawings, not the presses that open it
+              if (site.kind === 'api') noteCall(site.id, press.surface)
               results[site.id] = await runAction($, site.id)
               redraw()
             },

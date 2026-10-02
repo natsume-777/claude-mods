@@ -4,10 +4,12 @@
 //
 // sites.js         the SITES table, the per-site switches ($.state) and the call counts
 // pane.js          [Pane]: where it is drawn, the SITES index, the one-shot API buttons
+// elements.js      [ElementsPane] [Pane/Text] [Pane/Box] ...: one sample per element, its own pane
 // engine-lines.js  [Spinner] [SessionMode] [PromptHint] [CommandOutput]: the engine's own lines
 
 import { COMMAND, PANE, noteCall } from './sites.js'
 import { registerPane } from './pane.js'
+import { registerElements } from './elements.js'
 import { registerEngineLines } from './engine-lines.js'
 
 export function register(on) {
@@ -30,5 +32,6 @@ export function register(on) {
   })
 
   registerPane(on)
+  registerElements(on)
   registerEngineLines(on)
 }
