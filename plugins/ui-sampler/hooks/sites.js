@@ -27,7 +27,8 @@ export const DIALOG_OPEN = {
  * The categories the table of contents lists, in its order. Each SITES entry names one in
  * `category`. [開く] switches the one pane to the category's view (pane.js), which lists its
  * sites one line each; the element samples are a view of their own ('samples', elements.js)
- * reached from the 部品 category. A category marked `isPending` is listed as not made yet.
+ * reached from the 部品 category. A category marked `isPending` is listed as not made yet. One
+ * marked `hasOwnView` lists no SITES: its view draws its own rows (値: values.js).
  */
 export const CATEGORIES = [
   {
@@ -63,8 +64,8 @@ export const CATEGORIES = [
   {
     id: 'values',
     label: '値',
-    about: 'フックが受け取る値の見本（未実装）',
-    isPending: true,
+    about: '$ で取れる値、イベントが受け取った値、ボタンで呼ぶ API の答え。秘密になりうる値は、キー名・件数・文字数だけを出す',
+    hasOwnView: true,
   },
 ]
 

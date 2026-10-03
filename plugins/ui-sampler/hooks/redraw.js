@@ -10,6 +10,8 @@
 //   - new props or a new event input: when the pane shows that site's [詳細] card, at most
 //     once per REDRAW_GAP_MS across all sites
 // Anything else waits for the next drawing; [回数を更新] draws the pane again on request.
+// The values view (values.js) needs no invalidate: it reads what it shows from $.state, so a
+// write redraws it only while it is the drawing that read it.
 //
 // Pure: no $ here, so the hook files keep every $ call themselves. The pane's drawings write
 // what they show into module variables, since $.state.set is refused while drawing.
@@ -35,6 +37,14 @@ export function notePaneShows(view, detail) {
 export function notePaneClosed() {
   shownView = undefined
   shownDetail = undefined
+}
+
+/**
+ * Whether the pane's last drawing was the view `view` (and the pane is still open). The values
+ * view's timer runs only while it is.
+ */
+export function paneShowsView(view) {
+  return shownView === view
 }
 
 /** Whether the pane's last drawing listed the site (its category's view). */

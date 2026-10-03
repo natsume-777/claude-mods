@@ -7,11 +7,28 @@
 
 import { noteCall, noteEvent, toggleValue } from './sites.js'
 import { noteInvalidate } from './diag.js'
-import { redrawFor } from './redraw.js'
-import { read } from 'claude-code'
+import { redrawFor, paneShowsView } from './redraw.js'
+import { holdEvent, mergeHeld, restoreHeld } from './event-log.js'
+import { eventShape } from './value-format.js'
+import { read, update } from 'claude-code'
 
-// The state this file reads (declared in types/index.d.ts): one switch per site id
+// The state this file reads and writes (declared in types/index.d.ts): one switch per site
+// id, and the values view's event inputs
 const TOGGLES = { plugin: 'ui-sampler', key: 'toggles' }
+const EVENTS = { plugin: 'ui-sampler', key: 'events' }
+
+// Keeps one event's reduced input for the values view (event-log.js): written now, unless
+// that view is shown and wrote within REDRAW_GAP_MS, when its timer (values.js) writes it.
+// Never throws: the event goes on whatever happens.
+async function keepEvent($, name, shape) {
+  const batch = holdEvent(name, shape, Date.now(), paneShowsView('values'))
+  if (!batch) return
+  try {
+    await update($, EVENTS, current => mergeHeld(current, batch))
+  } catch {
+    restoreHeld(batch)
+  }
+}
 
 // Counts the call and keeps the input; redraws the pane only when it shows what changed
 // (redraw.js)
@@ -58,8 +75,11 @@ export function registerEvents(on) {
   // A text other than the answer is shown beneath the answer; the transcript's record keeps
   // the answer. A subagent's turn (agentId) is passed on as it came: its text is what the
   // caller of the subagent reads.
+  // It also keeps the input for the values view's [turn.complete] (values.js hooks the other
+  // events; a plugin hooks an event without a matcher once).
   on('turn.complete', async ($, e, next) => {
     noteEventCall($, 'turn.complete', e)
+    await keepEvent($, 'turn.complete', eventShape('turn.complete', e))
     if (e.agentId !== undefined || !(await isOn($, 'turn.complete'))) return next(e)
     const result = await next(e)
     const line = `[turn.complete] ui-sampler が足した行（reason: ${e.reason}、${seconds(e.durationMs)}、${usagePhrase(e.usage)}）`

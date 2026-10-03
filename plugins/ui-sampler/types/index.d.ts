@@ -14,10 +14,19 @@ export type UiSamplerSpinnerMode = 'word' | 'message' | 'suffix' | 'tree' | 'pro
 export type UiSamplerCommandOutputMode = 'tree' | 'text'
 
 /**
- * What the pane draws: the table of contents, one category's list (a CATEGORIES id), or the
- * element samples.
+ * What the pane draws: the table of contents, one category's list (a CATEGORIES id), the
+ * element samples, or the values view.
  */
-export type UiSamplerView = 'toc' | 'lines' | 'transcript' | 'dialogs' | 'api' | 'events' | 'elements' | 'samples'
+export type UiSamplerView = 'toc' | 'lines' | 'transcript' | 'dialogs' | 'api' | 'events' | 'elements' | 'samples' | 'values'
+
+/**
+ * One value as the values view keeps it: the row's text (cut short) and the [詳細]'s (in full,
+ * up to a limit). Both are already reduced to what may be shown. `isError`: the call failed.
+ */
+export type UiSamplerValue = { short: string; full: string; isError?: boolean }
+
+/** An event's last input as the values view keeps it, with when it came and how many came. */
+export type UiSamplerEventValue = UiSamplerValue & { at: number; count: number }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -26,7 +35,11 @@ declare module 'claude-code' {
       toggles: StateFamily<boolean>
       /** Unset means 'toc'. */
       view: UiSamplerView
-      /** The site id a category view shows the detail of, keyed by the category's id in CATEGORIES; unset means none. */
+      /**
+       * The site id a category view shows the detail of, keyed by the category's id in
+       * CATEGORIES; under 'values', the values view's row (`g:session.model`, `e:turn.step`,
+       * `c:http.fetch`). Unset or '' means none.
+       */
       selected: StateFamily<string>
       /** Unset means 'hint'. */
       promptHintMode: UiSamplerPromptHintMode
@@ -41,6 +54,12 @@ declare module 'claude-code' {
        * value. Unset means nothing happened yet.
        */
       echo: StateFamily<string>
+      /** The values view's getters, by the getter's id (`session.model`); unset means none fetched yet. */
+      getters: Record<string, UiSamplerValue>
+      /** The last input of each event the values view keeps, by event name (`turn.step`, `classic.Stop`). */
+      events: Record<string, UiSamplerEventValue>
+      /** The last result of each call button of the values view, keyed by the call's id (`http.fetch`). */
+      calls: StateFamily<UiSamplerValue>
     }
   }
 }

@@ -15,6 +15,10 @@
 // asks.js          [AskUserQuestion] [$.ui.notice]: the question dialog, the permission dialog
 // events.js        [command.describe] [turn.complete] [prompt.suggest]: engine events that are
 //                  not drawings (the $.prompt buttons are in pane.js)
+// values.js        [Pane/values]: the 値 category's view, what a mod can obtain (the getters on
+//                  $, the last input of each event, calls made from buttons, $.state and
+//                  $.store), and the event hooks that keep those inputs
+// value-format.js  the values view's tables, and the reducing of values to what may be shown
 // redraw.js        when a hook's new call or props are worth redrawing the pane for
 // diag.js          [診断/press]: the press, focus and redraw log
 // press-guard.js   [press/再実行]: runs a press again that did not reach its onPress
@@ -29,16 +33,37 @@ import { registerEngineLines } from './engine-lines.js'
 import { registerTranscript } from './transcript.js'
 import { registerAsks } from './asks.js'
 import { registerEvents } from './events.js'
+import { registerValues } from './values.js'
+import { holdEvent, mergeHeld, restoreHeld } from './event-log.js'
+import { eventShape } from './value-format.js'
+import { paneShowsView } from './redraw.js'
 import { atom, update } from 'claude-code'
 
-// The state this file writes (declared in types/index.d.ts): the pane's view, and
-// [DialogPane]'s echo lines, which say which entry opened it
+// The state this file writes (declared in types/index.d.ts): the pane's view, [DialogPane]'s
+// echo lines, which say which entry opened it, and the values view's event inputs
 const view = atom({ plugin: 'ui-sampler', key: 'view' }, 'toc')
 const ECHO = { plugin: 'ui-sampler', key: 'echo' }
+const EVENTS = { plugin: 'ui-sampler', key: 'events' }
+
+// Keeps one event's reduced input for the values view (event-log.js): written now, unless
+// that view is shown and wrote within REDRAW_GAP_MS, when its timer (values.js) writes it.
+// Never throws: the event goes on whatever happens.
+async function keepEvent($, name, shape) {
+  const batch = holdEvent(name, shape, Date.now(), paneShowsView('values'))
+  if (!batch) return
+  try {
+    await update($, EVENTS, current => mergeHeld(current, batch))
+  } catch {
+    restoreHeld(batch)
+  }
+}
 
 export function register(on) {
   // ===== session.start: /ui-sampler, /ui-sampler-dialog and the first [$.ui.status] =====
+  // Also keeps its input for the values view's [session.start] (values.js hooks the other
+  // events; a plugin hooks an event without a matcher once)
   on('session.start', async ($, e, next) => {
+    await keepEvent($, 'session.start', eventShape('session.start', e))
     await $.command.register({ name: COMMAND, description: 'UI の見本パネルを開く' })
     await $.command.register({ name: DIALOG_COMMAND, description: 'ダイアログ風のパネル [DialogPane] を開く' })
     noteCall('$.ui.status')
@@ -72,8 +97,10 @@ export function register(on) {
     return { text: `[command.run] /ui-sampler-dialog で [DialogPane] を開きました（${result}、presentation の ${where}）` }
   })
 
-  // registerElements before registerPane: both hook the pane, and the first registered is the
-  // outer link, so the samples view answers 'samples' and passes the rest to [Pane]
+  // registerValues, then registerElements, before registerPane: all three hook the pane, and
+  // the first registered is the outer link, so the values view answers 'values', the samples
+  // view 'samples', and each passes the rest on to [Pane]
+  registerValues(on)
   registerElements(on)
   registerPane(on)
   registerDialog(on)

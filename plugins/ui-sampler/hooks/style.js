@@ -25,6 +25,7 @@ export const WIDTH = {
   category: 14, // a category's name in the contents
   field: 20, // a field's name in a key/value list
   prop: 16, // a prop's name in the detail card
+  value: 30, // a value's `[noun.method]` in the values view: `[classic.UserPromptExpansion]` is 29
 }
 
 /**

@@ -8,6 +8,8 @@
 //                  call count by surface, the props a render site (or the input an event site)
 //                  last received, the last result
 //   'samples'      the element samples, drawn by elements.js's hook, which wraps this one
+//   'values'       the 値 category: what a mod can obtain, drawn by values.js's hook, which
+//                  wraps both
 // /ui-sampler sets the view back to 'toc' (register.js), the way back from a view that does
 // not draw. Spacing, columns, colors and button roles come from style.js.
 // Each drawing tells redraw.js what it shows, so the other hooks redraw it only for a change
@@ -285,9 +287,10 @@ async function selectedOf($, categoryId) {
   return read($, { ...SELECTED, id: categoryId })
 }
 
-// Picks the site to detail, or clears the pick when it is pressed again (never while drawing)
+// Picks the site to detail, or clears the pick when it is pressed again (never while drawing).
+// Cleared is '' ($.state.set takes no undefined), which names no site.
 function select($, categoryId, siteId) {
-  return update($, { ...SELECTED, id: categoryId }, value => (value === siteId ? undefined : siteId))
+  return update($, { ...SELECTED, id: categoryId }, value => (value === siteId ? '' : siteId))
 }
 
 // Reads the current choice of a site in MODE_CHOICES while drawing (subscribes the pane)
@@ -359,7 +362,7 @@ async function drawContents($, e, guard) {
       'category-' + category.id,
       [
         cell(ui, WIDTH.category, [Text({ bold: true, children: [category.label] })]),
-        cell(ui, WIDTH.count, [Text({ dimColor: true, children: [category.isPending ? '' : `${count} 件`] })]),
+        cell(ui, WIDTH.count, [Text({ dimColor: true, children: [category.isPending || category.hasOwnView ? '' : `${count} 件`] })]),
         cell(ui, WIDTH.detail, [
           category.isPending
             ? Text({ dimColor: true, children: ['未実装'] })
