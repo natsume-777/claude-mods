@@ -13,6 +13,11 @@
 // transcript.js    [UserMessage] [AssistantMessage] [ToolUse] [ToolResult] [ToolGroup]: the
 //                  transcript's rows; [ToolProgress] [TurnDuration] [InfoNotice]: counted only
 // asks.js          [AskUserQuestion] [$.ui.notice]: the question dialog, the permission dialog
+// events.js        [command.describe] [turn.complete] [prompt.suggest]: engine events that are
+//                  not drawings (the $.prompt buttons are in pane.js)
+// redraw.js        when a hook's new call or props are worth redrawing the pane for
+// diag.js          [診断/press]: the press, focus and redraw log
+// press-guard.js   [press/再実行]: runs a press again that did not reach its onPress
 // style.js         the shared look: spacing, column widths, colors, button roles, and pure
 //                  builders for headers, sections, table rows, fields and cards
 
@@ -23,6 +28,7 @@ import { registerDialog } from './dialog.js'
 import { registerEngineLines } from './engine-lines.js'
 import { registerTranscript } from './transcript.js'
 import { registerAsks } from './asks.js'
+import { registerEvents } from './events.js'
 import { atom, update } from 'claude-code'
 
 // The state this file writes (declared in types/index.d.ts): the pane's view, and
@@ -74,4 +80,5 @@ export function register(on) {
   registerEngineLines(on)
   registerTranscript(on)
   registerAsks(on)
+  registerEvents(on)
 }

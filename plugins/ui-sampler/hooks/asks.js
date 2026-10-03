@@ -4,19 +4,28 @@
 // a line under it, which [$.ui.notice] does from a tool.call hook on Bash.
 
 import { noteCall, noteProps, noteResult, toggleValue } from './sites.js'
-import { noteDiag } from './diag.js'
+import { noteInvalidate } from './diag.js'
+import { redrawFor, paneLists } from './redraw.js'
 import { read } from 'claude-code'
 
 // The state this file reads (declared in types/index.d.ts): one switch per site id
 const TOGGLES = { plugin: 'ui-sampler', key: 'toggles' }
 
-// Counts the call and keeps the props; redraws once (the pane's list) when either is new.
-// One dialog at a time, so a change of props is worth a redraw here.
+// Counts the call and keeps the props; redraws the pane only when it shows what changed
+// (redraw.js)
 function noteRender($, id, e) {
-  const isNewCall = noteCall(id, e.surface)
-  const isNewProps = noteProps(id, e)
-  if (!isNewCall && !isNewProps) return
-  noteDiag('invalidate', `${id} の${isNewCall ? '初回描画' : ' props が変わった'}`)
+  const isNew = noteCall(id, e.surface)
+  const isChanged = noteProps(id, e)
+  const why = redrawFor(id, { isNew, isChanged }, Date.now())
+  if (!why) return
+  noteInvalidate(`${id} の${why === 'first' ? '初回描画' : ' props が変わった'}`)
+  $.ui.invalidate('ui.render')
+}
+
+// Redraws the pane for a new result line, when the pane lists the site
+function redrawResult($, id) {
+  if (!paneLists(id)) return
+  noteInvalidate(`${id} の結果が変わった`)
   $.ui.invalidate('ui.render')
 }
 
@@ -68,13 +77,13 @@ export function registerAsks(on) {
       called = `エラー: ${String(error?.message ?? error)}（コマンド: ${command}）`
     }
     noteResult('$.ui.notice', called + '。実行を待っている')
-    $.ui.invalidate('ui.render')
+    redrawResult($, '$.ui.notice')
 
     const ran = await next(e)
     const outcome =
       ran.deny !== undefined ? `断られた（deny: ${ran.deny}）` : ran.isError === true ? 'エラーで終わった' : '実行された'
     noteResult('$.ui.notice', `${called}。その後の呼び出し: ${outcome}`)
-    $.ui.invalidate('ui.render')
+    redrawResult($, '$.ui.notice')
     return ran
   })
 }

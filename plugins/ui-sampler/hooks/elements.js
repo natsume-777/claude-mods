@@ -6,7 +6,8 @@
 
 import { SITES, toggleValue, noteCall } from './sites.js'
 import { SPACE, COLOR, BUTTON, dim, field, header, section, page } from './style.js'
-import { noteDiag, notePaneRender } from './diag.js'
+import { noteInvalidate, notePaneRender } from './diag.js'
+import { redrawFor, notePaneShows } from './redraw.js'
 import { guardDrawing } from './press-guard.js'
 import { atom, read, update } from 'claude-code'
 
@@ -23,10 +24,12 @@ const PRESSABLE_HREF = 'https://example.com/press'
 // Element keys allow a plain set of characters; site ids carry '/'
 const keyOf = (prefix, id) => prefix + '-' + id.replace(/[^A-Za-z0-9_-]/g, '_')
 
-// Counts the call, and redraws once (the category views' counts) when a site or surface is new
+// Counts the call, and redraws once when a site or surface is new and the main pane lists
+// the site (redraw.js)
 function noteRender($, id, e) {
-  if (!noteCall(id, e.surface)) return
-  noteDiag('invalidate', `${id} の初回描画（新しい surface）`)
+  const isNew = noteCall(id, e.surface)
+  if (!redrawFor(id, { isNew }, Date.now())) return
+  noteInvalidate(`${id} の初回描画（新しい surface）`)
   $.ui.invalidate('ui.render')
 }
 
@@ -383,6 +386,8 @@ export function registerElements(on) {
     if ((await read($, view)) !== 'samples') return next(e)
     notePaneRender(e)
     noteRender($, 'Pane', e)
+    // No counts or props in this view, so no hook needs to redraw it (redraw.js)
+    notePaneShows('samples', undefined)
     // The guard keeps this drawing's Button closures for [press/再実行] (press-guard.js)
     const guard = guardDrawing(e.requestId)
     const table = guard.wrap($.ui.resolve(e))

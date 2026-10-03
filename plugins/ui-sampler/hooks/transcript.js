@@ -5,19 +5,25 @@
 // count their calls and keep their props.
 //
 // Many rows share one site, so these hooks redraw (the pane's counts) only when a site or a
-// surface is new, never because the props changed: with several rows each would take its turn
-// as "changed", and every redraw draws every row again.
+// surface is new and the pane lists it, never because the props changed: with several rows
+// each would take its turn as "changed", and every redraw draws every row again.
 
 import { noteCall, keepProps, toggleValue } from './sites.js'
+import { noteInvalidate } from './diag.js'
+import { redrawFor } from './redraw.js'
 import { read } from 'claude-code'
 
 // The state this file reads (declared in types/index.d.ts): one switch per site id
 const TOGGLES = { plugin: 'ui-sampler', key: 'toggles' }
 
-// Counts the call and keeps the props; redraws once when the site or the surface is new
+// Counts the call and keeps the props; redraws once when the site or the surface is new and
+// the pane lists the site (redraw.js)
 function noteRow($, id, e) {
   keepProps(id, e)
-  if (noteCall(id, e.surface)) $.ui.invalidate('ui.render')
+  const isNew = noteCall(id, e.surface)
+  if (!redrawFor(id, { isNew }, Date.now())) return
+  noteInvalidate(`${id} の初回描画`)
+  $.ui.invalidate('ui.render')
 }
 
 // Reading the switch while drawing subscribes the row, so a press in the pane redraws it

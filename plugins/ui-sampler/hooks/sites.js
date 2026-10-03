@@ -51,6 +51,11 @@ export const CATEGORIES = [
     about: 'ボタンで呼ぶ API（ステータス行、トースト、ログ、コピー、パネルの一覧など）と、このパネル・コマンド自体',
   },
   {
+    id: 'events',
+    label: 'イベント・入力欄',
+    about: 'スラッシュコマンドの説明、ターンの終わり、プロンプト欄の提案と下書き。受け取った値は [詳細] に出る',
+  },
+  {
     id: 'elements',
     label: '部品',
     about: 'パネルに置ける部品（Text、Box、Button、Input など）の見本。ここで見本ごとにオン・オフし、[見本を見る] で並べて描く',
@@ -75,7 +80,8 @@ const ROW_PROPS_NOTE =
  * unchanged, an off element sample is left out of the samples view's tree. A render site's
  * `props` names each field of its render props with a short note of what it means (from the
  * type declarations); the pane lists the last props the site received against it, and
- * `propsNote` adds a line under that list.
+ * `propsNote` adds a line under that list. An event site's `props` does the same for the
+ * fields of its input `e`.
  */
 export const SITES = [
   {
@@ -454,6 +460,82 @@ export const SITES = [
     propsNote: ROW_PROPS_NOTE,
   },
   {
+    id: 'command.describe',
+    label: '[command.describe]',
+    kind: 'event',
+    category: 'events',
+    where: '/ を打ったときの候補と /help に出る、/ui-sampler と /ui-sampler-dialog の説明。オンにすると説明の頭に [command.describe] を付ける。答えはセッションの間覚えられるので、切り替えたときに $.ui.invalidate("command.describe") で聞き直させる',
+    toggleable: true,
+    defaultOn: false,
+    props: {
+      command: 'コマンド名（スラッシュなし）。書き換えは断られる',
+      description: '候補と /help に出る 1 行の説明（登録したときのもの）',
+      argumentHint: '名前の後ろに薄く出るヒント。あるときだけ',
+      isHidden: '候補と /help から外すなら true（打てば実行はできる）',
+      immediate: 'ターンの途中でもすぐ実行するコマンドなら true。読み取り専用',
+      provider: 'コマンドを出している plugin とその層。書き換えは断られる',
+    },
+  },
+  {
+    id: 'turn.complete',
+    label: '[turn.complete]',
+    kind: 'event',
+    category: 'events',
+    where: 'ターンが終わったとき（所要時間が出るところ）。オンにすると、答えの下に [turn.complete] の 1 行を出す（返す text を答えと違うものにすると、答えの下に出る）。サブエージェントのターンには何もしない',
+    toggleable: true,
+    defaultOn: false,
+    props: {
+      answer: 'このターンの最後に見えた答えの文字（なければ空）',
+      durationMs: 'ターンにかかった時間（ミリ秒）',
+      isAborted: '中断で終わったら true',
+      reason: '終わった理由: answer / aborted / refusal / error',
+      refusal: 'reason が refusal のときだけ: API が言った断りの中身',
+      turnId: 'このターンの id（turn.start・turn.step と同じ）',
+      agentId: 'サブエージェントのターンのときだけ: その id',
+      usage: 'このターンのトークン数（input_tokens・output_tokens・キャッシュ）と model。数えるものがなければなし',
+    },
+  },
+  {
+    id: 'prompt.suggest',
+    label: '[prompt.suggest]',
+    kind: 'event',
+    category: 'events',
+    where: 'プロンプト欄が空のときに薄く出る提案（Tab で取り込む）。エンジンのターン後の推測か、ほかの plugin の $.prompt.suggest のときに呼ばれる（この mod 自身の [$.prompt.suggest] はこのフックを通らない）。オンにすると、提案の頭に [prompt.suggest] を付ける',
+    toggleable: true,
+    defaultOn: false,
+    props: {
+      text: '提案する文字。取り込むと下書きになる',
+      origin: '誰の提案か（kind: suggestion ならエンジン、plugin なら name も）。読み取り専用',
+    },
+  },
+  {
+    id: '$.prompt.suggest',
+    label: '[$.prompt.suggest]',
+    kind: 'api',
+    category: 'events',
+    where: 'プロンプト欄に薄い提案を出す（Tab で取り込める）。欄に文字があるとき、ターンの実行中は出ない（isShown: false）',
+    toggleable: false,
+    defaultOn: true,
+  },
+  {
+    id: '$.prompt.fill',
+    label: '[$.prompt.fill]',
+    kind: 'api',
+    category: 'events',
+    where: "$.prompt.fill({ text, mode: 'append' }): プロンプト欄の下書きの後ろに文字を足す。打ちかけの文字は残る。ボタンを押したときだけ呼ぶ",
+    toggleable: false,
+    defaultOn: true,
+  },
+  {
+    id: '$.prompt.read',
+    label: '[$.prompt.read]',
+    kind: 'api',
+    category: 'events',
+    where: 'プロンプト欄の下書きを読む。ここには文字数とカーソルの位置だけを出し、中身は出さない',
+    toggleable: false,
+    defaultOn: true,
+  },
+  {
     id: 'Pane/Text',
     label: '[Pane/Text]',
     kind: 'element',
@@ -637,6 +719,14 @@ export function noteProps(id, e) {
  */
 export function keepProps(id, e) {
   seen.set(id, { text: undefined, snapshot: { surface: e.surface, props: e.props } })
+}
+
+/**
+ * Keeps an event site's latest input `e` (as the props of a surfaceless snapshot, so the pane
+ * lists it the way it lists a render site's props); returns true when it changed.
+ */
+export function noteEvent(id, e) {
+  return noteProps(id, { surface: undefined, props: e })
 }
 
 /** The last `{ surface, props }` a render site received, or undefined before its first call. */

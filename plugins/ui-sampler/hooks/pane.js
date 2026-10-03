@@ -5,10 +5,13 @@
 //                  call count, [詳細], the API's button), an API's last result under its row, and
 //                  below the list one detail card for the site picked with [詳細]: where it shows,
 //                  the choice of what [PromptHint], [Spinner] and [CommandOutput] write, the
-//                  call count by surface, the props a render site last received, the last result
+//                  call count by surface, the props a render site (or the input an event site)
+//                  last received, the last result
 //   'samples'      the element samples, drawn by elements.js's hook, which wraps this one
 // /ui-sampler sets the view back to 'toc' (register.js), the way back from a view that does
 // not draw. Spacing, columns, colors and button roles come from style.js.
+// Each drawing tells redraw.js what it shows, so the other hooks redraw it only for a change
+// it shows.
 
 import {
   DIALOG_OPEN,
@@ -42,7 +45,8 @@ import {
   stateMark,
   table,
 } from './style.js'
-import { noteDiag, notePaneRender, diagLines, clearDiag } from './diag.js'
+import { noteDiag, noteInvalidate, notePaneRender, diagLines, clearDiag, isNoiseKept, toggleNoise } from './diag.js'
+import { REDRAW_GAP_MS, redrawFor, notePaneShows, notePaneClosed } from './redraw.js'
 import { GRACE_MS, guardDrawing, beginPress, hasStarted, takeOver, endPress } from './press-guard.js'
 import { atom, read, update } from 'claude-code'
 
@@ -92,7 +96,16 @@ const ACTION_BUTTONS = {
   '$.ui.scroll': 'いちばん上へ',
   '$.ui.focus': 'フォーカスを移す',
   '$.session.append': 'system 行を足す',
+  '$.prompt.suggest': '提案を出す',
+  '$.prompt.fill': '下書きに足す',
+  '$.prompt.read': '下書きを読む',
 }
+
+/**
+ * Under the props of a site whose hook redraws for new props (redraw.js); the transcript rows
+ * never do, and their own note says so.
+ */
+const REDRAW_NOTE = `値が変わると、この [詳細] を開いている間だけパネルを描き直す（${REDRAW_GAP_MS / 1000} 秒に 1 回まで）。最新にするには「回数を更新」`
 
 // A module variable is enough for this: a reload starting it over does no harm
 let statusPresses = 0
@@ -205,15 +218,40 @@ async function runAction($, id, press) {
       }
     }
 
+    // ===== [$.prompt.suggest] $.prompt.suggest({ text }) =====
+    case '$.prompt.suggest': {
+      const suggested = await $.prompt.suggest({ text: '[$.prompt.suggest] ui-sampler の提案です' })
+      return suggested.isShown
+        ? 'isShown: true。プロンプト欄に薄く出ているはず（Tab で取り込める）'
+        : 'isShown: false（欄に文字がある、ターンの実行中、など）'
+    }
+
+    // ===== [$.prompt.fill] $.prompt.fill({ text, mode: 'append' }) =====
+    // Only from this button: it writes into the person's draft. 'append' keeps what they typed.
+    case '$.prompt.fill': {
+      const filled = await $.prompt.fill({ text: '[$.prompt.fill] ui-sampler が足した文字', mode: 'append' })
+      if (!filled.isFilled) return `isFilled: false、refusal: ${filled.refusal ?? '（なし）'}`
+      return `isFilled: true。下書きは ${filled.text.length} 文字、cursor: ${filled.cursor}`
+    }
+
+    // ===== [$.prompt.read] $.prompt.read() =====
+    // The draft is the person's: only its length and the cursor are shown, never its text
+    case '$.prompt.read': {
+      const box = await $.prompt.read()
+      return `下書きは ${box.text.length} 文字、cursor: ${box.cursor}`
+    }
+
     default:
       return '未対応: ' + id
   }
 }
 
-// Counts the call, and redraws once when a site or surface is new
+// Counts the call, and redraws once when a site or surface is new and this pane lists it
+// (redraw.js)
 function noteRender($, id, e) {
-  if (!noteCall(id, e.surface)) return
-  noteDiag('invalidate', `${id} の初回描画（新しい surface）`)
+  const isNew = noteCall(id, e.surface)
+  if (!redrawFor(id, { isNew }, Date.now())) return
+  noteInvalidate(`${id} の初回描画（新しい surface）`)
   $.ui.invalidate('ui.render')
 }
 
@@ -229,9 +267,17 @@ async function isOn($, id) {
   return toggleValue(id, await read($, { ...TOGGLES, id }))
 }
 
-// Flips a switch from a press handler (never while drawing)
-function toggle($, id) {
-  return update($, { ...TOGGLES, id }, value => !toggleValue(id, value))
+// Flips a switch from a press handler (never while drawing). A site whose answer the engine
+// caches has it asked again.
+async function toggle($, id) {
+  await update($, { ...TOGGLES, id }, value => !toggleValue(id, value))
+  switch (id) {
+    case 'command.describe':
+      $.ui.invalidate('command.describe')
+      return
+    default:
+      return
+  }
 }
 
 // The site a category view details; reading it while drawing subscribes the pane
@@ -281,7 +327,7 @@ function propsEntries(site) {
   if (!seen) return { meta: 'まだ呼ばれていない', entries: [], note: undefined }
   const names = [...new Set([...Object.keys(site.props), ...Object.keys(seen.props)])]
   return {
-    meta: `最後の 1 回、e.surface: ${seen.surface}`,
+    meta: site.kind === 'event' ? '最後の 1 回' : `最後の 1 回、e.surface: ${seen.surface}`,
     entries: names.map(name => ({
       name,
       value: formatValue(seen.props[name]),
@@ -294,6 +340,8 @@ function propsEntries(site) {
 // ===== [Pane] view 'toc': the table of contents =====
 // `guard` (press-guard.js) keeps this drawing's Button closures for [press/再実行]
 async function drawContents($, e, guard) {
+  // No counts or props in this view, so no hook needs to redraw it (redraw.js)
+  notePaneShows('toc', undefined)
   const ui = guard.wrap($.ui.resolve(e))
   const { Text, Button } = ui
 
@@ -347,7 +395,7 @@ async function drawCategory($, e, category, guard) {
   const ui = guard.wrap($.ui.resolve(e))
   const { Box, Text, Button } = ui
   const redraw = () => {
-    noteDiag('invalidate', 'パネルのボタンから')
+    noteInvalidate('パネルのボタンから')
     $.ui.invalidate('ui.render')
   }
   const dash = () => Text({ dimColor: true, children: ['—'] })
@@ -357,6 +405,8 @@ async function drawCategory($, e, category, guard) {
   // site's row and its last result are one table entry, so the gap falls between sites.
   // Reading each switch and the pick here subscribes the pane, so a press redraws it
   const picked = await selectedOf($, category.id)
+  // This view lists the category's counts and details `picked` (redraw.js)
+  notePaneShows(category.id, picked)
   const hasActions = sites.some(site => ACTION_BUTTONS[site.id])
   const headCells = [
     cell(ui, WIDTH.label, [Text({ dimColor: true, children: ['項目'] })]),
@@ -484,7 +534,7 @@ async function drawCategory($, e, category, guard) {
           width: '100%',
           children: [
             inline(ui, 'detail-props-heading', [
-              Text({ bold: true, children: ['受け取った props'] }),
+              Text({ bold: true, children: [site.kind === 'event' ? '受け取った e' : '受け取った props'] }),
               Text({ dimColor: true, children: [props.meta] }),
             ]),
             ...props.entries.map(entry =>
@@ -506,6 +556,7 @@ async function drawCategory($, e, category, guard) {
               ),
             ),
             props.note ? dim(ui, 'detail-props-note', props.note) : null,
+            site.category !== 'transcript' ? dim(ui, 'detail-props-redraw', REDRAW_NOTE) : null,
           ],
         }),
       )
@@ -542,15 +593,17 @@ async function drawCategory($, e, category, guard) {
 // ===== [診断/press] the press, focus and redraw log (diag.js), in the API view =====
 // What arrived around a press: ui.press and ui.focus as this mod's hooks saw them, each
 // drawing of this pane with e.props.isFocused, and each $.ui.invalidate this mod made. As of
-// this drawing; [記録を更新] draws it again.
+// this drawing; [記録を更新] draws it again. The Spinner's redraws and the drawings they bring
+// are left out unless the switch keeps them.
 function diagSection(ui, redraw) {
   const { Button } = ui
   const lines = diagLines()
-  return section(ui, 'diag', '[診断/press] 押下・フォーカス・再描画の記録（新しい順）', [
+  const isNoiseOn = isNoiseKept()
+  return section(ui, 'diag', '[診断/press] 押下・フォーカス・再描画の記録（新しい順、100 件まで）', [
     dim(
       ui,
       'diag-about',
-      'press は ui.press フックに届いた押下と next(e) の結果、[press/再実行] は onPress まで届かなかった押下をこの mod が最新の描画で実行し直したこと、focus は ui.focus フック、render はこのパネルの描画、invalidate はこの mod が頼んだ再描画。表示はこの描画の時点のもので、[記録を更新] で最新になる',
+      'press は ui.press フックに届いた押下と next(e) の結果、[press/再実行] は onPress まで届かなかった押下をこの mod が最新の描画で実行し直したこと、focus は ui.focus フック、render はこのパネルの描画、invalidate はこの mod が頼んだ再描画。スピナーが原因の invalidate と render は、「スピナー由来も記録」をオンにしたときだけ残す。表示はこの描画の時点のもので、[記録を更新] で最新になる',
     ),
     inline(ui, 'diag-nav', [
       Button({ key: 'diag-refresh', label: '記録を更新', ...BUTTON.nav, onPress: redraw }),
@@ -563,6 +616,24 @@ function diagSection(ui, redraw) {
           redraw()
         },
       }),
+      inline(
+        ui,
+        'diag-noise',
+        [
+          stateMark(ui, isNoiseOn),
+          Button({
+            key: 'diag-noise-toggle',
+            label: isNoiseOn ? 'スピナー由来も記録: オン' : 'スピナー由来も記録: オフ',
+            ...(isNoiseOn ? BUTTON.nav : BUTTON.minor),
+            onPress: () => {
+              toggleNoise()
+              redraw()
+            },
+          }),
+        ],
+        0,
+        SPACE.mark,
+      ),
     ]),
     lines.length > 0
       ? ui.Box({
@@ -650,6 +721,15 @@ export function registerPane(on) {
       noteDiag('[press/再実行]', `${e.element} の再実行で例外: ${errorText(error)}`)
     }
     return { element: e.element }
+  })
+
+  // ===== [Pane] ui.close { id: 'ui-sampler' } =====
+  // Once the pane is closed nothing of it is on screen, so the other hooks stop redrawing it
+  // (redraw.js). Lets the close through unchanged.
+  on('ui.close', { id: 'ui-sampler' }, async ($, e, next) => {
+    const result = await next(e)
+    if (!result?.deny) notePaneClosed()
+    return result
   })
 
   // ===== [診断/press] ui.focus { component: 'Pane' } =====

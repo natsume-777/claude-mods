@@ -17,7 +17,7 @@ export type UiSamplerCommandOutputMode = 'tree' | 'text'
  * What the pane draws: the table of contents, one category's list (a CATEGORIES id), or the
  * element samples.
  */
-export type UiSamplerView = 'toc' | 'lines' | 'transcript' | 'dialogs' | 'api' | 'elements' | 'samples'
+export type UiSamplerView = 'toc' | 'lines' | 'transcript' | 'dialogs' | 'api' | 'events' | 'elements' | 'samples'
 
 declare module 'claude-code' {
   interface PluginState {

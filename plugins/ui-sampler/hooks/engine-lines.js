@@ -5,7 +5,8 @@
 
 import { DIALOG_OPEN, noteCall, noteProps, formatValue, toggleValue } from './sites.js'
 import { SPACE, BUTTON, dim, inline } from './style.js'
-import { noteDiag } from './diag.js'
+import { noteInvalidate } from './diag.js'
+import { redrawFor } from './redraw.js'
 import { atom, read, update } from 'claude-code'
 
 // The state this file reads (declared in types/index.d.ts): one switch per site id, which
@@ -17,12 +18,15 @@ const promptHintMode = atom({ plugin: 'ui-sampler', key: 'promptHintMode' }, 'hi
 const spinnerMode = atom({ plugin: 'ui-sampler', key: 'spinnerMode' }, 'word')
 const commandOutputMode = atom({ plugin: 'ui-sampler', key: 'commandOutputMode' }, 'tree')
 
-// Counts the call and keeps the props; redraws once (the pane's list) when either is new
+// Counts the call and keeps the props; redraws the pane only when it shows what changed
+// (redraw.js). The Spinner's props can change many times in a turn, so its
+// redraws are marked as noise for the diag log.
 function noteRender($, id, e) {
-  const isNewCall = noteCall(id, e.surface)
-  const isNewProps = noteProps(id, e)
-  if (!isNewCall && !isNewProps) return
-  noteDiag('invalidate', `${id} の${isNewCall ? '初回描画' : ' props が変わった'}`)
+  const isNew = noteCall(id, e.surface)
+  const isChanged = noteProps(id, e)
+  const why = redrawFor(id, { isNew, isChanged }, Date.now())
+  if (!why) return
+  noteInvalidate(`${id} の${why === 'first' ? '初回描画' : ' props が変わった'}`, id === 'Spinner')
   $.ui.invalidate('ui.render')
 }
 

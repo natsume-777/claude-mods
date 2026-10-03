@@ -6,17 +6,20 @@
 
 import { DIALOG_PANE, noteCall } from './sites.js'
 import { BUTTON, dim, inline, field, header, section, page } from './style.js'
-import { noteDiag } from './diag.js'
+import { noteInvalidate } from './diag.js'
+import { redrawFor } from './redraw.js'
 import { guardDrawing } from './press-guard.js'
 import { read, update } from 'claude-code'
 
 // The state this file reads and writes (declared in types/index.d.ts): its echo lines
 const ECHO = { plugin: 'ui-sampler', key: 'echo' }
 
-// Counts the call, and redraws once (the pane's counts) when a site or surface is new
+// Counts the call, and redraws once when a site or surface is new and the main pane lists
+// the site (redraw.js)
 function noteRender($, id, e) {
-  if (!noteCall(id, e.surface)) return
-  noteDiag('invalidate', `${id} の初回描画（新しい surface）`)
+  const isNew = noteCall(id, e.surface)
+  if (!redrawFor(id, { isNew }, Date.now())) return
+  noteInvalidate(`${id} の初回描画（新しい surface）`)
   $.ui.invalidate('ui.render')
 }
 
