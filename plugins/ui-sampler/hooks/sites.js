@@ -28,7 +28,8 @@ export const DIALOG_OPEN = {
  * `category`. [開く] switches the one pane to the category's view (pane.js), which lists its
  * sites one line each; the element samples are a view of their own ('samples', elements.js)
  * reached from the 部品 category. A category marked `isPending` is listed as not made yet. One
- * marked `hasOwnView` lists no SITES: its view draws its own rows (値: values.js).
+ * marked `hasOwnView` lists no SITES: its view draws its own rows (値: values.js). `note` is a
+ * line under the category view's buttons.
  */
 export const CATEGORIES = [
   {
@@ -59,7 +60,13 @@ export const CATEGORIES = [
   {
     id: 'elements',
     label: '部品',
-    about: 'パネルに置ける部品（Text、Box、Button、Input など）の見本。ここで見本ごとにオン・オフし、[見本を見る] で並べて描く',
+    about: 'パネルに置ける部品（Text、Box、Button、Input、Raster、Image、Client など）の見本。ここで見本ごとにオン・オフし、[見本を見る] で並べて描く',
+  },
+  {
+    id: 'effects',
+    label: '副作用のある API',
+    about: 'ボタンを押したときだけ呼ぶ、状態を変える API（音を出す、環境変数を書く、ファイルを書く）。どれもこのセッションの中で元に戻せるものだけ',
+    note: '入れていないもの: $.session.compact（会話を圧縮して元に戻せない）、$.agent.spawn（サブエージェントがトークンを使う）、$.config.set（利用者の設定を書き換える）、$.turn.abort（実行中のターンを止める）',
   },
   {
     id: 'values',
@@ -478,6 +485,22 @@ export const SITES = [
     },
   },
   {
+    id: 'config.describe',
+    label: '[config.describe]',
+    kind: 'event',
+    category: 'events',
+    where: '/config のメニューの各行（$.config.list の答えにも使われる）。行を足すことはできず、ラベル・説明の書き換えと隠すことだけができる。オンにすると、どの行もラベルの頭に [config.describe] を付ける。答えは覚えられるので、切り替えたときに $.ui.invalidate("config.describe") で聞き直させる',
+    toggleable: true,
+    defaultOn: false,
+    props: {
+      key: '行の名前（$.config.set の key と同じ）。書き換えは断られる',
+      label: 'メニューで値の前に出る文字',
+      description: 'ラベルの下の説明（プラグインの userConfig の項目のときなど）。なければなし',
+      isHidden: 'メニューから外すなら true（隠しても $.config.set と /config key=value は効く）',
+      provider: 'その行の持ち主（plugin と tier）。書き換えは断られる',
+    },
+  },
+  {
     id: 'turn.complete',
     label: '[turn.complete]',
     kind: 'event',
@@ -634,6 +657,107 @@ export const SITES = [
     element: 'Svg',
     where: 'Svg: 画像として / width・height で縮める / isInteractive（:hover と動き）',
     toggleable: true,
+    defaultOn: true,
+  },
+  {
+    id: 'Pane/Raster',
+    label: '[Pane/Raster]',
+    kind: 'element',
+    category: 'elements',
+    element: 'Raster',
+    where: 'Raster: 24×6 マスの色のグラデーション。型定義ではターミナルだけの部品。「動かす」で [$.ui.blit] を 2 秒間（10 fps）呼んで色を流す',
+    toggleable: true,
+    defaultOn: true,
+  },
+  {
+    id: 'Pane/Image',
+    label: '[Pane/Image]',
+    kind: 'element',
+    category: 'elements',
+    element: 'Image',
+    where: 'Image: 8×4 ピクセルの RGBA を 8 桁×2 行に描く。型定義ではターミナルだけの部品で、絵を出せない端末では alt の文字が出る。「入れ替える」で [$.ui.blit] が別の色の絵に替える',
+    toggleable: true,
+    defaultOn: true,
+  },
+  {
+    id: 'Pane/Client',
+    label: '[Pane/Client]',
+    kind: 'element',
+    category: 'elements',
+    element: 'Client',
+    where: 'Client: この mod の小さな surface module（hooks/client-echo.js）が描く枠。中の「送る」で surface.post し、[ui.message] のフックが返す props で答えを写す',
+    toggleable: true,
+    defaultOn: true,
+  },
+  {
+    id: '$.ui.blit',
+    label: '[$.ui.blit]',
+    kind: 'api',
+    category: 'elements',
+    where: '描き直しなしで、Raster の cells やキー付きの Image の source を差し替える。見本の「動かす」「入れ替える」から呼ぶ。結果は {}（受け取った）か deny の理由',
+    toggleable: false,
+    defaultOn: true,
+  },
+  {
+    id: 'ui.message',
+    label: '[ui.message]',
+    kind: 'event',
+    category: 'elements',
+    where: '[Pane/Client] の surface module が surface.post で送ったものを受け取るフック。{ props: { reply } } を返して、その Client に答えを渡す',
+    toggleable: false,
+    defaultOn: true,
+    props: {
+      surface: 'Client が描かれている surface',
+      component: 'Client を描いた場所（Pane など）',
+      requestId: 'Client を描いた描画の id',
+      element: 'Client の key',
+      module: 'Client の surface module のパス',
+      data: 'surface module が送ったもの（コードが送った値なので、事実として扱わない）',
+    },
+  },
+  {
+    id: '$.audio.play',
+    label: '[$.audio.play]',
+    kind: 'api',
+    category: 'effects',
+    where: '0.2 秒の小さな音（660 Hz、この mod がその場で作った WAV を base64 で渡す）を 1 回鳴らす。音が出る。終わると結果が出る',
+    toggleable: false,
+    defaultOn: true,
+  },
+  {
+    id: '$.audio.speak',
+    label: '[$.audio.speak]',
+    kind: 'api',
+    category: 'effects',
+    where: 'OS の音声合成で「ユーアイ サンプラー」と読み上げる。音が出る。読み終わると、どの合成器が読んだか（via）が出る',
+    toggleable: false,
+    defaultOn: true,
+  },
+  {
+    id: '$.env.set',
+    label: '[$.env.set]',
+    kind: 'api',
+    category: 'effects',
+    where: 'Claude Code のプロセスの環境変数 UI_SAMPLER_SAMPLE に値を入れ、$.env.get で読み直す。この mod だけが使う名前で、セッションを終えると消える',
+    toggleable: false,
+    defaultOn: true,
+  },
+  {
+    id: '$.env.set/unset',
+    label: '[$.env.set/unset]',
+    kind: 'api',
+    category: 'effects',
+    where: '$.env.set に undefined を渡して UI_SAMPLER_SAMPLE を消し、$.env.get で読み直す',
+    toggleable: false,
+    defaultOn: true,
+  },
+  {
+    id: '$.fs.write',
+    label: '[$.fs.write]',
+    kind: 'api',
+    category: 'effects',
+    where: 'OS の一時フォルダ（環境変数 TMPDIR、TEMP、TMP の順に探す）に ui-sampler-sample.txt を書き、$.fs.read で読み直す。毎回同じファイルを上書きする。一時フォルダが分からなければ書かない。場所は画面に出さない',
+    toggleable: false,
     defaultOn: true,
   },
 ]

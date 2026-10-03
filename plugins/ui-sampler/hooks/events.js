@@ -1,5 +1,6 @@
 // Engine events that are not drawings: how the slash commands are described in the typeahead
-// and /help, the end of a turn, and the dim suggestion in the prompt box. Each hook counts its
+// and /help, how the /config rows are labelled, the end of a turn, and the dim suggestion in
+// the prompt box. Each hook counts its
 // call and keeps the input it received (the pane lists it in the [詳細] card), then passes
 // `next(e)` on unchanged when its site is switched off in the pane. All are off by default.
 // The $.prompt calls ([$.prompt.suggest] [$.prompt.fill] [$.prompt.read]) are the pane's
@@ -55,6 +56,16 @@ async function describeCommand($, e, next) {
   return next({ ...e, description: '[command.describe] ' + e.description })
 }
 
+// ===== [config.describe] the label of each /config row =====
+// A hook can relabel, re-describe or hide a row, not add one. On, every row's label is led by
+// the site's label. The engine caches the answers; the pane's switch asks again with
+// $.ui.invalidate('config.describe').
+async function describeConfig($, e, next) {
+  noteEventCall($, 'config.describe', e)
+  if (!(await isOn($, 'config.describe'))) return next(e)
+  return next({ ...e, label: '[config.describe] ' + e.label })
+}
+
 /** `3.2 秒`, from milliseconds. */
 const seconds = ms => `${(ms / 1000).toFixed(1)} 秒`
 
@@ -70,6 +81,9 @@ export function registerEvents(on) {
 
   // ===== [command.describe] on('command.describe', { command: 'ui-sampler-dialog' }) =====
   on('command.describe', { command: 'ui-sampler-dialog' }, async ($, e, next) => describeCommand($, e, next))
+
+  // ===== [config.describe] on('config.describe'): every row, so no matcher =====
+  on('config.describe', async ($, e, next) => describeConfig($, e, next))
 
   // ===== [turn.complete] on('turn.complete') =====
   // A text other than the answer is shown beneath the answer; the transcript's record keeps

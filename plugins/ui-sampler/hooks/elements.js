@@ -3,12 +3,15 @@
 // drawn at all, so the samples are a view of their own and each has an on/off switch, listed
 // in the elements category's view (pane.js), not here: /ui-sampler goes back to the contents, then
 // switch samples off until this view shows; the last one switched off is the one refused.
+// [Pane/Raster] and [Pane/Image] have buttons that repaint them with [$.ui.blit]; [Pane/Client]
+// runs this mod's surface module (client-echo.js), answered by the [ui.message] hook here.
 
-import { SITES, toggleValue, noteCall } from './sites.js'
+import { SITES, toggleValue, noteCall, noteEvent, noteResult } from './sites.js'
 import { SPACE, COLOR, BUTTON, dim, field, header, section, page } from './style.js'
 import { noteInvalidate, notePaneRender } from './diag.js'
 import { redrawFor, notePaneShows } from './redraw.js'
 import { guardDrawing } from './press-guard.js'
+import { RASTER, IMAGE, rasterCells, imageSource } from './bytes.js'
 import { atom, read, update } from 'claude-code'
 
 // The state this file reads and writes (declared in types/index.d.ts): the pane's view, one
@@ -23,6 +26,29 @@ const PRESSABLE_HREF = 'https://example.com/press'
 
 // Element keys allow a plain set of characters; site ids carry '/'
 const keyOf = (prefix, id) => prefix + '-' + id.replace(/[^A-Za-z0-9_-]/g, '_')
+
+// ----- [$.ui.blit]: module variables -----
+// The blits run from a timer, and a $.state write per frame would redraw the pane the blit is
+// meant to spare. So the phase each picture is at, the running animation and the last reply
+// to the Client are kept here; a redraw draws the pictures at their current phase. Only the
+// start and the end of an animation write $.state (the echo line under the sample).
+
+/** The animation of [Pane/Raster]: one blit every FRAME_MS, FRAMES of them (2 s at 10 fps). */
+const FRAME_MS = 100
+const FRAMES = 20
+
+let rasterPhase = 0
+let imagePhase = 0
+// The running animation: { timer, frames, taken, denied, lastDeny }, or undefined
+let animation
+// What the [ui.message] hook last answered the Client, handed again on each redraw
+let clientReply
+
+/** One line for the blits of an animation: how many, how many taken, the last deny. */
+function blitSummary(run) {
+  const denied = run.denied > 0 ? `、deny が ${run.denied} 回（最後の理由: ${run.lastDeny}）` : ''
+  return `$.ui.blit を ${run.frames} 回呼んだ: {} が ${run.taken} 回${denied}`
+}
 
 // Counts the call, and redraws once when a site or surface is new and the main pane lists
 // the site (redraw.js)
@@ -53,6 +79,67 @@ function echoTo($, id, text) {
 // Reading an echo while drawing subscribes the pane, so a write redraws it
 async function echoOf($, id) {
   return (await read($, { ...ECHO, id })) ?? 'まだ何もしていない'
+}
+
+// ===== [$.ui.blit] $.ui.blit({ requestId: 'ui-sampler', key: 'raster-sample', cells }) =====
+// One frame of the animation, from its timer: the next phase's cells, counted by the answer
+async function blitFrame($) {
+  const run = animation
+  if (!run) return
+  run.frames += 1
+  rasterPhase = (rasterPhase + 1 / FRAMES) % 1
+  const result = await $.ui.blit({ requestId: 'ui-sampler', key: 'raster-sample', cells: rasterCells(RASTER.columns, RASTER.rows, rasterPhase) })
+  noteCall('$.ui.blit')
+  if (result?.deny) {
+    run.denied += 1
+    run.lastDeny = result.deny
+  } else {
+    run.taken += 1
+  }
+  if (run.frames >= FRAMES) await stopAnimation($, run, `${(FRAMES * FRAME_MS) / 1000} 秒たったので止まった`)
+}
+
+// Starts the animation from 「動かす」 (a press, never while drawing); a second press while it
+// runs does nothing
+async function startAnimation($) {
+  if (animation) return
+  const run = { timer: undefined, frames: 0, taken: 0, denied: 0, lastDeny: undefined }
+  animation = run
+  await echoTo($, 'Pane/Raster', `動かしている（${FRAME_MS} ms ごとに ${FRAMES} 回）`)
+  try {
+    run.timer = $.clock.every(FRAME_MS, () => {
+      blitFrame($).catch(error => stopAnimation($, run, '例外で止まった: ' + String(error?.message ?? error)))
+    })
+  } catch (error) {
+    await stopAnimation($, run, 'タイマーを始められなかった: ' + String(error?.message ?? error))
+  }
+}
+
+// Ends the animation `run` (its last frame, 「止める」, or a failure) and writes its summary
+// once, which redraws the sample at the phase it reached
+async function stopAnimation($, run, why) {
+  if (!run || animation !== run) return
+  animation = undefined
+  run.timer?.cancel()
+  const summary = blitSummary(run)
+  noteResult('$.ui.blit', '[Pane/Raster] ' + summary)
+  await echoTo($, 'Pane/Raster', `${why}。${summary}`)
+}
+
+// ===== [$.ui.blit] $.ui.blit({ requestId: 'ui-sampler', key: 'image-sample', source }) =====
+// 「入れ替える」: the Image's next picture, the gradient half a turn on
+async function swapImage($) {
+  imagePhase = (imagePhase + 0.5) % 1
+  let text
+  try {
+    const result = await $.ui.blit({ requestId: 'ui-sampler', key: 'image-sample', source: imageSource(IMAGE.width, IMAGE.height, imagePhase) })
+    text = result?.deny ? 'deny: ' + result.deny : '{}（受け取った）'
+  } catch (error) {
+    text = 'エラー: ' + String(error?.message ?? error)
+  }
+  noteCall('$.ui.blit')
+  noteResult('$.ui.blit', '[Pane/Image] ' + text)
+  await echoTo($, 'Pane/Image', '入れ替えた結果: ' + text)
 }
 
 // Whether a tree holds an element of the given type. The table a surface hands out may be
@@ -355,6 +442,40 @@ async function drawSample($, table, id) {
       ]
     }
 
+    // ===== [Pane/Raster] Raster { key, columns, rows, cells } =====
+    case 'Pane/Raster': {
+      return [
+        table.Raster({
+          key: 'raster-sample',
+          columns: RASTER.columns,
+          rows: RASTER.rows,
+          cells: rasterCells(RASTER.columns, RASTER.rows, rasterPhase),
+        }),
+      ]
+    }
+
+    // ===== [Pane/Image] Image { key, source, columns, rows, alt } =====
+    case 'Pane/Image': {
+      return [
+        table.Image({
+          key: 'image-sample',
+          source: imageSource(IMAGE.width, IMAGE.height, imagePhase),
+          columns: IMAGE.columns,
+          rows: IMAGE.rows,
+          alt: '[Pane/Image] 8×4 ピクセルの色のグラデーション（絵を出せない端末ではこの文字）',
+        }),
+      ]
+    }
+
+    // ===== [Pane/Client] Client { key, module, props } =====
+    // `module` is a literal: the engine reads the surface module off this file's source
+    case 'Pane/Client': {
+      return [
+        table.Client({ key: 'client-echo', module: './client-echo.js', props: { reply: clientReply ?? null } }),
+        note('上の枠の中は、この mod の surface module（hooks/client-echo.js）が描いている'),
+      ]
+    }
+
     // ===== [Pane/Svg] Svg { source, alt, width, height, isInteractive } =====
     case 'Pane/Svg': {
       return [
@@ -375,6 +496,34 @@ async function drawSample($, table, id) {
 
     default:
       return [note('未対応: ' + id)]
+  }
+}
+
+/**
+ * The buttons under a sample that repaints with [$.ui.blit], and its echo line; none for the
+ * other samples. Drawn whether or not the surface draws the element, so a blit's deny there
+ * can be seen too.
+ */
+async function drawControls($, table, id) {
+  const { Box, Text } = table
+  const row = children =>
+    Box({ flexDirection: 'row', columnGap: SPACE.inline, rowGap: SPACE.control, alignItems: 'center', flexWrap: 'wrap', children })
+  switch (id) {
+    case 'Pane/Raster':
+      return [
+        row([
+          table.Button({ key: 'raster-start', label: '動かす', onPress: () => startAnimation($) }),
+          table.Button({ key: 'raster-stop', label: '止める', ...BUTTON.minor, onPress: () => stopAnimation($, animation, '「止める」で止めた') }),
+        ]),
+        Box({ key: 'raster-echo', width: '100%', children: [Text({ dimColor: true, wrap: 'wrap', children: [await echoOf($, 'Pane/Raster')] })] }),
+      ]
+    case 'Pane/Image':
+      return [
+        row([table.Button({ key: 'image-swap', label: '入れ替える', onPress: () => swapImage($) })]),
+        Box({ key: 'image-echo', width: '100%', children: [Text({ dimColor: true, wrap: 'wrap', children: [await echoOf($, 'Pane/Image')] })] }),
+      ]
+    default:
+      return []
   }
 }
 
@@ -403,14 +552,20 @@ export function registerElements(on) {
       if (!(await isOn($, site.id))) {
         body = [dim(table, keyOf('off', site.id), 'オフにしてあるので描いていない（「部品」の一覧で切り替える）')]
       } else if (typeof table[site.element] !== 'function') {
-        body = [Text({ color: COLOR.warn, children: [`${site.label} この surface にはない（表に ${site.element} がない）`] })]
+        body = [
+          Text({ color: COLOR.warn, children: [`${site.label} この surface にはない（表に ${site.element} がない）`] }),
+          ...(await drawControls($, table, site.id)),
+        ]
       } else {
         const sample = await drawSample($, table, site.id)
         if (sample.some(node => containsType(node, site.element))) {
           noteCall(site.id, e.surface)
-          body = sample
+          body = [...sample, ...(await drawControls($, table, site.id))]
         } else {
-          body = [Text({ color: COLOR.warn, children: [`${site.label} この surface にはない（表の ${site.element} が別の要素を返した）`] })]
+          body = [
+            Text({ color: COLOR.warn, children: [`${site.label} この surface にはない（表の ${site.element} が別の要素を返した）`] }),
+            ...(await drawControls($, table, site.id)),
+          ]
         }
       }
 
@@ -437,5 +592,20 @@ export function registerElements(on) {
         field(table, 'where-table', '$.ui.resolve(e) の表', Object.keys(table).join(', ')),
       ]),
     ]))
+  })
+
+  // ===== [ui.message] on('ui.message'): what [Pane/Client]'s surface module posts =====
+  // Answers the posting Client its next props (the reply), with no redraw; the reply is also
+  // kept for the samples view's next drawing. The data came from code, so only a number is
+  // taken from it.
+  on('ui.message', async ($, e, next) => {
+    noteCall('ui.message', e.surface)
+    noteEvent('ui.message', e)
+    const result = await next(e)
+    if (e.element !== 'client-echo') return result
+    const count = typeof e.data?.count === 'number' ? e.data.count : '（数でない値）'
+    clientReply = `${count} 回目を受け取った（surface: ${e.surface}、component: ${e.component}）`
+    noteResult('ui.message', clientReply)
+    return { ...result, props: { reply: clientReply } }
   })
 }

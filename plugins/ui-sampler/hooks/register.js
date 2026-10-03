@@ -6,15 +6,19 @@
 // pane.js          [Pane]: one pane whose view switches: the table of contents, or one category's
 //                  sites a line each with the [詳細] of one, and the one-shot API buttons
 // elements.js      [Pane/samples] [Pane/Text] [Pane/Box] ...: the pane's view of one sample per
-//                  element
+//                  element; [$.ui.blit] repaints [Pane/Raster] and [Pane/Image], [ui.message]
+//                  answers [Pane/Client]
+// client-echo.js   [Pane/Client]: the surface module the Client sample runs (no $ there)
+// bytes.js         the bytes of [Pane/Raster], [Pane/Image] and [$.audio.play]'s beep
 // dialog.js        [DialogPane]: a second pane, opened with $.ui.open's dialog options
 // engine-lines.js  [Spinner] [SessionMode] [PromptHint] [AbovePrompt] [CommandOutput]: the engine's
 //                  own lines, and the band above the prompt
 // transcript.js    [UserMessage] [AssistantMessage] [ToolUse] [ToolResult] [ToolGroup]: the
 //                  transcript's rows; [ToolProgress] [TurnDuration] [InfoNotice]: counted only
 // asks.js          [AskUserQuestion] [$.ui.notice]: the question dialog, the permission dialog
-// events.js        [command.describe] [turn.complete] [prompt.suggest]: engine events that are
-//                  not drawings (the $.prompt buttons are in pane.js)
+// events.js        [command.describe] [config.describe] [turn.complete] [prompt.suggest]: engine
+//                  events that are not drawings (the $.prompt buttons are in pane.js, as are the
+//                  effects category's [$.audio.*] [$.env.set] [$.fs.write])
 // values.js        [Pane/values]: the 値 category's view, what a mod can obtain (the getters on
 //                  $, the last input of each event, calls made from buttons, $.state and
 //                  $.store), and the event hooks that keep those inputs

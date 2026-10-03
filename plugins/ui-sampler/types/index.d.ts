@@ -17,7 +17,7 @@ export type UiSamplerCommandOutputMode = 'tree' | 'text'
  * What the pane draws: the table of contents, one category's list (a CATEGORIES id), the
  * element samples, or the values view.
  */
-export type UiSamplerView = 'toc' | 'lines' | 'transcript' | 'dialogs' | 'api' | 'events' | 'elements' | 'samples' | 'values'
+export type UiSamplerView = 'toc' | 'lines' | 'transcript' | 'dialogs' | 'api' | 'events' | 'elements' | 'effects' | 'samples' | 'values'
 
 /**
  * One value as the values view keeps it: the row's text (cut short) and the [詳細]'s (in full,

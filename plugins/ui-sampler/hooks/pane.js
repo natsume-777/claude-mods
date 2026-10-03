@@ -50,6 +50,7 @@ import {
 import { noteDiag, noteInvalidate, notePaneRender, diagLines, clearDiag, isNoiseKept, toggleNoise } from './diag.js'
 import { REDRAW_GAP_MS, redrawFor, notePaneShows, notePaneClosed } from './redraw.js'
 import { GRACE_MS, guardDrawing, beginPress, hasStarted, takeOver, endPress } from './press-guard.js'
+import { beepWav } from './bytes.js'
 import { atom, read, update } from 'claude-code'
 
 // The state this file reads and writes (declared in types/index.d.ts): the pane's view, one
@@ -101,7 +102,17 @@ const ACTION_BUTTONS = {
   '$.prompt.suggest': '提案を出す',
   '$.prompt.fill': '下書きに足す',
   '$.prompt.read': '下書きを読む',
+  '$.audio.play': '短い音を鳴らす（音が出る）',
+  '$.audio.speak': '読み上げる（音が出る）',
+  '$.env.set': 'UI_SAMPLER_SAMPLE を設定して読み直す',
+  '$.env.set/unset': 'UI_SAMPLER_SAMPLE を消して読み直す',
+  '$.fs.write': '一時フォルダに書いて読み直す',
 }
+
+/** What [$.audio.speak] says. */
+const SPEECH = 'ユーアイ サンプラー'
+/** The file [$.fs.write] writes in the OS temp folder, overwritten on every press. */
+const SAMPLE_FILE = 'ui-sampler-sample.txt'
 
 /**
  * Under the props of a site whose hook redraws for new props (redraw.js); the transcript rows
@@ -243,6 +254,79 @@ async function runAction($, id, press) {
       return `下書きは ${box.text.length} 文字、cursor: ${box.cursor}`
     }
 
+    // ===== [$.audio.play] $.audio.play({ base64, mime: 'audio/wav' }, { gain: 0.5 }) =====
+    // Only from this button: it makes a sound. Resolves when the clip has played.
+    case '$.audio.play': {
+      try {
+        await $.audio.play(beepWav(), { gain: 0.5 })
+        return '鳴らし終えた（0.2 秒の WAV、gain: 0.5）'
+      } catch (error) {
+        return '鳴らせなかった: ' + errorText(error)
+      }
+    }
+
+    // ===== [$.audio.speak] $.audio.speak(text) =====
+    // Only from this button: it makes a sound. Resolves when the utterance has ended.
+    case '$.audio.speak': {
+      try {
+        const spoken = await $.audio.speak(SPEECH)
+        return `読み終えた（via: ${spoken?.via ?? '不明'}）`
+      } catch (error) {
+        return '読み上げられなかった: ' + errorText(error)
+      }
+    }
+
+    // ===== [$.env.set] $.env.set('UI_SAMPLER_SAMPLE', value), then $.env.get =====
+    // A name of this mod's own; the names are literals, so `plugin validate` lists them
+    case '$.env.set': {
+      try {
+        const value = 'ui-sampler ' + new Date().toISOString()
+        await $.env.set('UI_SAMPLER_SAMPLE', value)
+        const back = await $.env.get('UI_SAMPLER_SAMPLE')
+        return `UI_SAMPLER_SAMPLE に「${value}」を入れた。読み直した値: ${back === undefined ? '未設定' : `「${back}」`}`
+      } catch (error) {
+        return 'エラー: ' + errorText(error)
+      }
+    }
+
+    // ===== [$.env.set/unset] $.env.set('UI_SAMPLER_SAMPLE', undefined), then $.env.get =====
+    case '$.env.set/unset': {
+      try {
+        await $.env.set('UI_SAMPLER_SAMPLE', undefined)
+        const back = await $.env.get('UI_SAMPLER_SAMPLE')
+        return `UI_SAMPLER_SAMPLE を消した。読み直した値: ${back === undefined ? '未設定' : `「${back}」`}`
+      } catch (error) {
+        return 'エラー: ' + errorText(error)
+      }
+    }
+
+    // ===== [$.fs.write] $.fs.write(<OS temp folder>/ui-sampler-sample.txt, text), then $.fs.read =====
+    // Only under the OS temp folder, found from the environment; the path holds the person's
+    // user name on some systems, so it is never shown, only the file's name
+    case '$.fs.write': {
+      let folder
+      try {
+        folder = (await $.env.get('TMPDIR')) ?? (await $.env.get('TEMP')) ?? (await $.env.get('TMP'))
+        if (!folder) return '一時フォルダが分からない（TMPDIR、TEMP、TMP のどれもない）ので書かなかった'
+        const path = folder.replace(/[\\/]+$/, '') + '/' + SAMPLE_FILE
+        const text = '[$.fs.write] ui-sampler が書いた行 ' + new Date().toISOString()
+        await $.fs.write(path, text)
+        const back = await $.fs.read(path)
+        return `一時フォルダの ${SAMPLE_FILE} に ${text.length} 文字を書いた。読み直した中身が一致: ${back === text}`
+      } catch (error) {
+        // The OS's message can name the path: the folder, with either separator, is replaced
+        // before it is shown
+        let message = errorText(error)
+        if (folder) {
+          const bare = folder.replace(/[\\/]+$/, '')
+          for (const form of [bare, bare.replace(/\\/g, '/'), bare.replace(/\//g, '\\')]) {
+            message = message.split(form).join('<一時フォルダ>')
+          }
+        }
+        return 'エラー: ' + message
+      }
+    }
+
     default:
       return '未対応: ' + id
   }
@@ -276,6 +360,9 @@ async function toggle($, id) {
   switch (id) {
     case 'command.describe':
       $.ui.invalidate('command.describe')
+      return
+    case 'config.describe':
+      $.ui.invalidate('config.describe')
       return
     default:
       return
@@ -585,7 +672,7 @@ async function drawCategory($, e, category, guard) {
       note:
         category.id === 'elements'
           ? '見本でパネルが真っ白になったら、/ui-sampler で目次に戻り、ここで [Pane/…] を 1 つずつオフにすると、どれが断られているか分かる'
-          : undefined,
+          : category.note,
     }),
     section(ui, 'list', '一覧', [table(ui, 'list-table', entries)]),
     section(ui, 'detail-section', '詳細', [detail]),
