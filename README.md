@@ -9,6 +9,7 @@ Claude Code の mod 集です。
 | --- | --- |
 | [usage-band](plugins/usage-band/README.md) | プロンプト入力欄の上に、コンテキストと 5 時間制限・週間制限の使用率を表示する |
 | [ui-sampler](plugins/ui-sampler/README.md) | mod が描ける場所、呼べる API、受け取れる値を一通り試す見本。表示はすべて出どころの名前付き |
+| [cache-timer](plugins/cache-timer/README.md) | プロンプトキャッシュが切れるまでの残り時間を、フッターのモデル名の左に表示する |
 
 ## インストール
 

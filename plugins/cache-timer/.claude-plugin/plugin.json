@@ -1,0 +1,16 @@
+{
+  "name": "cache-timer",
+  "version": "0.1.0",
+  "description": "Shows how long the prompt cache has left, next to the model name in the footer",
+  "author": { "name": "Natsume777" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "ttl": {
+      "type": "string",
+      "title": "キャッシュの有効期間",
+      "description": "プロンプトキャッシュが切れるまでの時間。5m（5 分）か 1h（1 時間）",
+      "options": ["1h", "5m"],
+      "default": "1h"
+    }
+  }
+}

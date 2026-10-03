@@ -1,9 +1,14 @@
 // Shows context, 5-hour limit and weekly limit usage in the band above the prompt.
-// Each session shows only what it measured itself; nothing is shared through $.store.
+// Each session shows only what it measured or read itself; nothing is shared through $.store.
 
 // The latest figures from $.session.usage() or session.measure
 let context = null
 let rateLimits = []
+// When the shown rate-limit figures last changed ($.clock.now() ms), and which source brought
+// them: 'measure' (session.measure), 'poll' ($.session.usage() on the minute tick or an
+// attach) or 'start' (the read at session start). Kept for comparing sessions side by side.
+let rateLimitsAt = null
+let rateLimitsSource = null
 // Refreshes the countdowns; kept so a later session.start or session.end can stop it
 let ticker = null
 
@@ -28,9 +33,16 @@ export function register(on) {
   // Fires again on an enable or a worker respawn, which may keep this module's variables
   on('session.start', async ($, e, next) => {
     ticker?.cancel()
-    await readUsage($)
-    ticker = $.clock.every(TICK_MS, () => $.ui.invalidate('ui.render'))
+    await readUsage($, 'start')
+    // Counts the resets down and polls the figures, so an idle session catches up too
+    ticker = $.clock.every(TICK_MS, () => void refresh($))
     $.ui.invalidate('ui.render')
+    return next(e)
+  })
+
+  // The desktop app (or another client) joined the session: read the figures again
+  on('session.attach', async ($, e, next) => {
+    await refresh($)
     return next(e)
   })
 
@@ -41,7 +53,7 @@ export function register(on) {
 
   // session.measure reports a changed context only after the next turn, so read it now
   on('classic.SessionStart', { source: ['clear', 'resume', 'fork', 'compact'] }, async ($, e, next) => {
-    await readUsage($)
+    await readUsage($, 'start')
     $.ui.invalidate('ui.render')
     return next(e)
   })
@@ -49,7 +61,7 @@ export function register(on) {
   // Fires after each turn, and when a rate-limit window moves a whole point
   on('session.measure', async ($, e, next) => {
     context = e.context
-    if (e.changed.includes('rateLimits')) rateLimits = e.rateLimits
+    if (e.changed.includes('rateLimits')) setRateLimits(e.rateLimits, 'measure', await $.clock.now())
     $.ui.invalidate('ui.render')
     return next(e)
   })
@@ -69,13 +81,16 @@ export function register(on) {
       })
     }
     for (const m of meters) m.value = valueText(m, now)
-    const gauge = e.surface === 'desktop' ? 'svg' : barsFit(meters, e.props.bodyColumns ?? 0) ? 'text' : 'none'
+    const stamp = rateLimits.length > 0 && rateLimitsAt != null ? clockText(rateLimitsAt) : null
+    const gauge = e.surface === 'desktop' ? 'svg' : barsFit(meters, stamp, e.props.bodyColumns ?? 0) ? 'text' : 'none'
 
-    const line = elements.Box({
-      flexDirection: 'row',
-      columnGap: METER_GAP,
-      children: meters.map((m) => meter(elements, gauge, m)),
-    })
+    const children = meters.map((m) => meter(elements, gauge, m))
+    // When the rate-limit figures last changed, so two sessions can be compared
+    if (stamp) {
+      const time = elements.Text({ dimColor: true, children: [stamp] })
+      children.push(elements.Box({ key: 'rate-time', flexDirection: 'row', alignItems: 'center', children: [time] }))
+    }
+    const line = elements.Box({ flexDirection: 'row', columnGap: METER_GAP, children })
     // Keep what later mods draw in the band
     const rest = await next(e)
     if (!rest) return line
@@ -83,10 +98,28 @@ export function register(on) {
   })
 }
 
-async function readUsage($) {
+async function readUsage($, source) {
   const usage = await $.session.usage()
   context = usage.context
-  rateLimits = usage.rateLimits
+  setRateLimits(usage.rateLimits, source, await $.clock.now())
+}
+
+// Polls the figures and redraws; a failed read keeps the last figures
+async function refresh($) {
+  try {
+    await readUsage($, 'poll')
+  } catch {}
+  $.ui.invalidate('ui.render')
+}
+
+// Takes new rate-limit figures; the time moves only when they differ from the shown ones, so
+// it says how old the figures are, not when they were last asked for
+function setRateLimits(limits, source, now) {
+  const isFirst = rateLimitsAt == null && limits.length > 0
+  if (!isFirst && JSON.stringify(limits) === JSON.stringify(rateLimits)) return
+  rateLimits = limits
+  rateLimitsAt = now
+  rateLimitsSource = source
 }
 
 function statusOf(used) {
@@ -102,9 +135,17 @@ function valueText({ used, resetsAt }, now) {
 }
 
 // Whether every meter fits on one line with its text bar; every character drawn is one cell wide
-function barsFit(meters, columns) {
-  const width = meters.reduce((sum, m) => sum + [...m.label].length + 1 + BAR_CELLS + 1 + [...m.value].length, 0)
-  return width + METER_GAP * (meters.length - 1) <= columns - BAND_RESERVED_COLUMNS
+function barsFit(meters, stamp, columns) {
+  let width = meters.reduce((sum, m) => sum + [...m.label].length + 1 + BAR_CELLS + 1 + [...m.value].length, 0)
+  width += METER_GAP * (meters.length - 1)
+  if (stamp) width += METER_GAP + stamp.length
+  return width <= columns - BAND_RESERVED_COLUMNS
+}
+
+// Local time as HH:MM
+function clockText(ms) {
+  const d = new Date(ms)
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
 }
 
 function meter({ Box, Text, Svg }, gauge, { label, used, value }) {

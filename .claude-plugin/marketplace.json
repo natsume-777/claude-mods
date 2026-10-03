@@ -14,6 +14,11 @@
       "name": "ui-sampler",
       "source": "./plugins/ui-sampler",
       "description": "A labelled catalog of every place a mod can draw, every API it can call and every value it can read"
+    },
+    {
+      "name": "cache-timer",
+      "source": "./plugins/cache-timer",
+      "description": "Shows how long the prompt cache has left, next to the model name in the footer"
     }
   ]
 }
