@@ -1,7 +1,7 @@
 {
   "name": "ui-sampler",
-  "version": "0.1.0",
-  "description": "Tries each place a mod can draw: pane, toast, status, log, notice, dialog and the engine's own lines",
+  "version": "0.2.0",
+  "description": "A labelled catalog of every place a mod can draw, every API it can call and every value it can read",
   "author": { "name": "Natsume777" },
   "types": "./types/index.d.ts"
 }

@@ -8,7 +8,7 @@ Claude Code の mod 集です。
 | mod | 内容 |
 | --- | --- |
 | [usage-band](plugins/usage-band/README.md) | プロンプト入力欄の上に、コンテキストと 5 時間制限・週間制限の使用率を表示する |
-| [ui-sampler](plugins/ui-sampler/README.md) | mod が UI を描ける場所を一通り試す見本 |
+| [ui-sampler](plugins/ui-sampler/README.md) | mod が描ける場所、呼べる API、受け取れる値を一通り試す見本。表示はすべて出どころの名前付き |
 
 ## インストール
 
