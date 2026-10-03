@@ -107,7 +107,7 @@ const diffSource = [
  */
 async function drawSample($, table, id) {
   const { Box, Text } = table
-  const note = text => Text({ dimColor: true, children: [text] })
+  const note = text => Text({ dimColor: true, wrap: 'wrap', children: [text] })
   const row = children => Box({ flexDirection: 'row', columnGap: 1, alignItems: 'center', flexWrap: 'wrap', children })
 
   switch (id) {
@@ -138,7 +138,7 @@ async function drawSample($, table, id) {
         // A Text's hover applies under the nearest keyed Box
         Box({
           key: 'text-hover',
-          children: [Text({ hover: { color: 'warning', bold: true }, children: ['hover: この行にポインタを載せると色が変わる'] })],
+          children: [Text({ hover: { color: 'warning', bold: true }, wrap: 'wrap', children: ['hover: この行にポインタを載せると色が変わる'] })],
         }),
       ]
     }
@@ -166,7 +166,7 @@ async function drawSample($, table, id) {
         Box({
           key: 'box-card',
           children: [
-            Text({ children: ['position: absolute: ここにポインタを載せると、上にカードが重なって出る'] }),
+            Text({ wrap: 'wrap', children: ['position: absolute: ここにポインタを載せると、上にカードが重なって出る'] }),
             Box({
               position: 'absolute',
               top: -3,
@@ -360,7 +360,7 @@ export function registerElements(on) {
     noteRender($, 'ElementsPane', e)
     const table = $.ui.resolve(e)
     const { Box, Text, Button } = table
-    const dim = (key, text) => Text({ key, dimColor: true, children: [text] })
+    const dim = (key, text) => Text({ key, dimColor: true, wrap: 'wrap', children: [text] })
 
     const sections = []
     for (const site of SITES) {
@@ -400,6 +400,7 @@ export function registerElements(on) {
         Box({
           key: keyOf('sample', site.id),
           flexDirection: 'column',
+          width: '100%',
           children: [heading, dim(keyOf('where', site.id), site.where), ...body],
         }),
       )
@@ -408,10 +409,12 @@ export function registerElements(on) {
     return Box({
       flexDirection: 'column',
       rowGap: 1,
+      width: '100%',
       children: [
         Text({ bold: true, children: ['[ElementsPane] 部品の見本'] }),
         Box({
           flexDirection: 'column',
+          width: '100%',
           children: [
             dim('surface', 'e.surface: ' + e.surface),
             dim('table', '$.ui.resolve(e) の表: ' + Object.keys(table).join(', ')),

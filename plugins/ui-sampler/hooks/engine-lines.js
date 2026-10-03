@@ -1,18 +1,25 @@
-// The engine's own lines this mod rewrites or redraws while it is loaded. Each hook counts its
-// call first (so the pane can tell "not raised" from "raised but not drawn"), then passes
-// `next(e)` on unchanged when its site is switched off in the pane.
+// The engine's own lines this mod rewrites or redraws while it is loaded, and the band above
+// the prompt it adds to. Each hook counts its call and keeps the props it received first (so
+// the pane can tell "not raised" from "raised but not drawn", and list what came in), then
+// passes `next(e)` on unchanged when its site is switched off in the pane.
 
-import { noteCall, toggleValue } from './sites.js'
-import { atom, read } from 'claude-code'
+import { DIALOG_OPEN, noteCall, noteProps, formatValue, toggleValue } from './sites.js'
+import { atom, read, update } from 'claude-code'
 
-// The state this file reads (declared in types/index.d.ts): one switch per site id, and which
-// PromptHint prop to write ('hint' replaces the line, 'tail' adds after it)
+// The state this file reads (declared in types/index.d.ts): one switch per site id, which
+// prop [PromptHint], [Spinner] and [CommandOutput] write, and the band's and [DialogPane]'s echo
+// lines
 const TOGGLES = { plugin: 'ui-sampler', key: 'toggles' }
+const ECHO = { plugin: 'ui-sampler', key: 'echo' }
 const promptHintMode = atom({ plugin: 'ui-sampler', key: 'promptHintMode' }, 'hint')
+const spinnerMode = atom({ plugin: 'ui-sampler', key: 'spinnerMode' }, 'word')
+const commandOutputMode = atom({ plugin: 'ui-sampler', key: 'commandOutputMode' }, 'tree')
 
-// Counts the call, and redraws once (the pane's counts) when a site or surface is new
+// Counts the call and keeps the props; redraws once (the pane's list) when either is new
 function noteRender($, id, e) {
-  if (noteCall(id, e.surface)) $.ui.invalidate('ui.render')
+  const isNewCall = noteCall(id, e.surface)
+  const isNewProps = noteProps(id, e)
+  if (isNewCall || isNewProps) $.ui.invalidate('ui.render')
 }
 
 // Reading the switch while drawing subscribes the hook, so a press in the pane redraws it
@@ -20,13 +27,60 @@ async function isOn($, id) {
   return toggleValue(id, await read($, { ...TOGGLES, id }))
 }
 
+// Writes one of the band's echo lines from a handler (never while drawing)
+function echoTo($, id, text) {
+  return update($, { ...ECHO, id }, () => text)
+}
+
+// Reading an echo while drawing subscribes the band, so a write redraws it
+async function echoOf($, id) {
+  return (await read($, { ...ECHO, id })) ?? 'まだ何もしていない'
+}
+
+// ===== [DialogPane] $.ui.open({ id: 'ui-sampler-dialog', ... }) from the band =====
+// One of three entry points (also the main pane's button and /ui-sampler-dialog), all with
+// DIALOG_OPEN. The opener is written before the open so the pane's first drawing shows it.
+async function openDialogFromBand($, press) {
+  await echoTo($, 'DialogPane:openedBy', `[AbovePrompt] の帯のボタン（ui.press、surface: ${press.surface}）`)
+  const opened = await $.ui.open(DIALOG_OPEN)
+  const result = opened.isPlaced ? 'isPlaced: true' : `isPlaced: false、reason: ${opened.reason}`
+  await echoTo($, 'DialogPane:openResult', result)
+  return echoTo($, 'AbovePrompt:press', `[DialogPane] を開いた（${result}）`)
+}
+
+// `name=value` for every prop received, in the order they came
+const propPairs = props =>
+  Object.entries(props)
+    .map(([name, value]) => `${name}=${formatValue(value)}`)
+    .join(' ')
+
 export function registerEngineLines(on) {
   // ===== [Spinner] ui.render { component: 'Spinner' } =====
-  // The line that animates while a turn runs: a rewrite of `word`
+  // The line that animates while a turn runs. The pane chooses what to write: `word`,
+  // `message` or `suffix`; a tree of its own that lists the props received; or that list
+  // written into `word`.
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
     noteRender($, 'Spinner', e)
     if (!(await isOn($, 'Spinner'))) return next(e)
-    return next({ ...e, props: { ...e.props, word: '[Spinner] 見本市を準備中' } })
+    const mode = await read($, spinnerMode)
+    switch (mode) {
+      case 'message':
+        return next({ ...e, props: { ...e.props, message: '[Spinner] message を書き換え' } })
+      case 'suffix':
+        return next({ ...e, props: { ...e.props, suffix: ' [Spinner] suffix を書き換え' } })
+      case 'tree': {
+        const { Text } = $.ui.resolve(e)
+        return Text({
+          color: 'warning',
+          wrap: 'wrap',
+          children: ['[Spinner] 自前のツリー: ' + propPairs(e.props)],
+        })
+      }
+      case 'props':
+        return next({ ...e, props: { ...e.props, word: '[Spinner] ' + propPairs(e.props) } })
+      default:
+        return next({ ...e, props: { ...e.props, word: '[Spinner] word を書き換え' } })
+    }
   })
 
   // ===== [SessionMode] ui.render { component: 'SessionMode' } =====
@@ -53,21 +107,77 @@ export function registerEngineLines(on) {
     return next({ ...e, props: { ...e.props, hint: `[PromptHint] hint を書き換え（元: ${e.props.hint}）` } })
   })
 
+  // ===== [AbovePrompt] ui.render { component: 'AbovePrompt' } =====
+  // The band above the prompt. Other mods draw here too, so this asks `next(e)` for theirs
+  // first and puts its own labelled row above it rather than replacing it; while a survey
+  // holds the band it passes.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    noteRender($, 'AbovePrompt', e)
+    const inner = await next(e)
+    if (e.props.hasSurvey || !(await isOn($, 'AbovePrompt'))) return inner
+    const { Box, Text, Button, Input } = $.ui.resolve(e)
+    const ours = Box({
+      flexDirection: 'column',
+      children: [
+        Box({
+          flexDirection: 'row',
+          columnGap: 1,
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          children: [
+            Text({ bold: true, children: ['[AbovePrompt]'] }),
+            Button({
+              key: 'band-press',
+              label: '帯のボタン',
+              onPress: press => echoTo($, 'AbovePrompt:press', `押された（e.surface: ${press.surface}）`),
+            }),
+            Button({
+              key: 'band-dialog',
+              label: '[DialogPane] を開く',
+              onPress: press => openDialogFromBand($, press),
+            }),
+            Input({
+              key: 'band-input',
+              label: '帯の入力',
+              placeholder: 'ここに入力して Enter',
+              submitLabel: '写す',
+              onSubmit: value => echoTo($, 'AbovePrompt:submit', value),
+            }),
+          ],
+        }),
+        Text({
+          dimColor: true,
+          wrap: 'wrap',
+          children: [
+            `ボタン: ${await echoOf($, 'AbovePrompt:press')} / 入力: ${await echoOf($, 'AbovePrompt:submit')}`,
+          ],
+        }),
+        inner ? Text({ dimColor: true, wrap: 'wrap', children: ['[AbovePrompt] この下はほかの mod の帯（next(e) が返したもの）'] }) : null,
+      ],
+    })
+    return inner ? Box({ flexDirection: 'column', children: [ours, inner] }) : ours
+  })
+
   // ===== [CommandOutput] ui.render { component: 'CommandOutput', props: { command: 'ui-sampler' } } =====
   // The row /ui-sampler leaves in the transcript. command.run answered text starting with
-  // [command.run]; this draws a tree that puts [CommandOutput] in front of it, so the row shows
-  // both layers. Switched off, the engine draws the plain [command.run] text alone.
+  // [command.run]. The pane chooses: a tree that puts [CommandOutput] in front of that text,
+  // or a rewrite of `text` the engine draws in its own row. Switched off, the engine draws
+  // the plain [command.run] text alone.
   // The matcher is COMMAND's value as a literal, so `plugin validate` can list it
   on('ui.render', { component: 'CommandOutput', props: { command: 'ui-sampler' } }, async ($, e, next) => {
     noteRender($, 'CommandOutput', e)
     if (!(await isOn($, 'CommandOutput'))) return next(e)
+    const mode = await read($, commandOutputMode)
+    if (mode === 'text') {
+      return next({ ...e, props: { ...e.props, text: `[CommandOutput] text を書き換え（元: ${e.props.text}）` } })
+    }
     const { Box, Text } = $.ui.resolve(e)
     return Box({
       flexDirection: 'row',
       columnGap: 1,
       children: [
-        Text({ color: 'success', bold: true, children: ['[CommandOutput]'] }),
-        Text({ children: [e.props.text] }),
+        Text({ color: 'success', bold: true, children: ['[CommandOutput] 自前のツリー'] }),
+        Text({ wrap: 'wrap', children: [e.props.text] }),
       ],
     })
   })
