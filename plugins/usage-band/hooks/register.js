@@ -1,20 +1,25 @@
 // Shows context, 5-hour limit and weekly limit usage in the band above the prompt.
-// Each session shows only what it measured or read itself; nothing is shared through $.store.
+// The context figure is this session's own. The rate-limit figures are the account's, but each
+// session reads them only from its own last API response, so the newest reading any session
+// made is shared through $.store, and every session shows the newer of its own and the stored.
 
-// The latest figures from $.session.usage() or session.measure
+// This session's context, from $.session.usage() or session.measure; never shared
 let context = null
-let rateLimits = []
-// When the shown rate-limit figures last changed ($.clock.now() ms), and which source brought
-// them: 'measure' (session.measure), 'poll' ($.session.usage() on the minute tick or an
-// attach) or 'start' (the read at session start). Kept for comparing sessions side by side.
-let rateLimitsAt = null
-let rateLimitsSource = null
+// This session's own rate-limit reading, { rateLimits, measuredAt }: measuredAt is
+// $.clock.now() ms when the figures arrived here (the engine gives no response time)
+let own = null
+// The reading drawn: own, or the stored one when that is newer
+let shown = null
 // Refreshes the countdowns; kept so a later session.start or session.end can stop it
 let ticker = null
 
 // session.end reasons after which the session is gone; /clear, /resume and logout keep it running
 const FINAL_REASONS = ['prompt_input_exit', 'other']
 const TICK_MS = 60_000
+// The $.store key holding the newest reading any session made
+const STORE_KEY = 'rateLimits'
+// Two resetsAt this close are the same window; the next window resets at least 5 hours later
+const SAME_WINDOW_MS = 3_600_000
 
 const LABELS = { five_hour: '5h', seven_day: '7d', spend_limit: '$' }
 
@@ -33,8 +38,9 @@ export function register(on) {
   // Fires again on an enable or a worker respawn, which may keep this module's variables
   on('session.start', async ($, e, next) => {
     ticker?.cancel()
-    await readUsage($, 'start')
-    // Counts the resets down and polls the figures, so an idle session catches up too
+    await readUsage($)
+    await sync($)
+    // Counts the resets down, polls this session's figures and picks up the stored ones
     ticker = $.clock.every(TICK_MS, () => void refresh($))
     $.ui.invalidate('ui.render')
     return next(e)
@@ -53,7 +59,8 @@ export function register(on) {
 
   // session.measure reports a changed context only after the next turn, so read it now
   on('classic.SessionStart', { source: ['clear', 'resume', 'fork', 'compact'] }, async ($, e, next) => {
-    await readUsage($, 'start')
+    await readUsage($)
+    await sync($)
     $.ui.invalidate('ui.render')
     return next(e)
   })
@@ -61,7 +68,8 @@ export function register(on) {
   // Fires after each turn, and when a rate-limit window moves a whole point
   on('session.measure', async ($, e, next) => {
     context = e.context
-    if (e.changed.includes('rateLimits')) setRateLimits(e.rateLimits, 'measure', await $.clock.now())
+    takeRateLimits(e.rateLimits, await $.clock.now())
+    await sync($)
     $.ui.invalidate('ui.render')
     return next(e)
   })
@@ -70,7 +78,7 @@ export function register(on) {
     const elements = $.ui.resolve(e)
     const now = await $.clock.now()
     const meters = [{ label: 'ctx', used: context?.percent, resetsAt: null }]
-    for (const limit of rateLimits) {
+    for (const limit of shown?.rateLimits ?? []) {
       const resetsAt = limit.resetsAt == null ? null : Date.parse(limit.resetsAt)
       // A window that reset since the last measurement starts again from zero
       const reset = resetsAt != null && resetsAt <= now
@@ -81,11 +89,11 @@ export function register(on) {
       })
     }
     for (const m of meters) m.value = valueText(m, now)
-    const stamp = rateLimits.length > 0 && rateLimitsAt != null ? clockText(rateLimitsAt) : null
+    const stamp = shown && shown.rateLimits.length > 0 ? clockText(shown.measuredAt) : null
     const gauge = e.surface === 'desktop' ? 'svg' : barsFit(meters, stamp, e.props.bodyColumns ?? 0) ? 'text' : 'none'
 
     const children = meters.map((m) => meter(elements, gauge, m))
-    // When the rate-limit figures last changed, so two sessions can be compared
+    // When the shown rate-limit figures were measured, by whichever session
     if (stamp) {
       const time = elements.Text({ dimColor: true, children: [stamp] })
       children.push(elements.Box({ key: 'rate-time', flexDirection: 'row', alignItems: 'center', children: [time] }))
@@ -98,28 +106,75 @@ export function register(on) {
   })
 }
 
-async function readUsage($, source) {
+async function readUsage($) {
   const usage = await $.session.usage()
   context = usage.context
-  setRateLimits(usage.rateLimits, source, await $.clock.now())
+  takeRateLimits(usage.rateLimits, await $.clock.now())
 }
 
-// Polls the figures and redraws; a failed read keeps the last figures
+// Polls this session's figures, syncs with the store and redraws; a failed read keeps the last
+// figures
 async function refresh($) {
   try {
-    await readUsage($, 'poll')
+    await readUsage($)
   } catch {}
+  await sync($)
   $.ui.invalidate('ui.render')
 }
 
-// Takes new rate-limit figures; the time moves only when they differ from the shown ones, so
-// it says how old the figures are, not when they were last asked for
-function setRateLimits(limits, source, now) {
-  const isFirst = rateLimitsAt == null && limits.length > 0
-  if (!isFirst && JSON.stringify(limits) === JSON.stringify(rateLimits)) return
-  rateLimits = limits
-  rateLimitsAt = now
-  rateLimitsSource = source
+// Takes this session's rate-limit figures as a new reading only when they differ from its last
+// one, so measuredAt says how old the figures are, not when they were last asked for
+function takeRateLimits(limits, now) {
+  if (!Array.isArray(limits) || limits.length === 0) return
+  if (own && JSON.stringify(limits) === JSON.stringify(own.rateLimits)) return
+  own = { rateLimits: limits, measuredAt: now }
+}
+
+// Publishes this session's reading when it is newer than the stored one, and shows the newer of
+// the two. Read, compare, write: two sessions syncing at once may both write, and the later
+// write wins even if it is the older reading. That loses at most a moment's difference, and the
+// session holding the newer reading writes it again on its next sync (within a minute).
+async function sync($) {
+  let stored = null
+  try {
+    stored = asReading(await $.store.get(STORE_KEY))
+  } catch {}
+  if (own && newer(own, stored) === own) {
+    try {
+      await $.store.set(STORE_KEY, own)
+    } catch {}
+  }
+  shown = newer(own, stored)
+}
+
+// A stored value as a reading, or null when it is not one (unset, or written by something else)
+function asReading(value) {
+  if (!value || !Array.isArray(value.rateLimits) || typeof value.measuredAt !== 'number') return null
+  return value
+}
+
+// The newer of two readings; b when they tie. The figures decide first: a percentage never falls
+// within a window, so a reading behind the other is older whatever its time says (a stale reading
+// stamped late, such as the one a re-fired session.start takes in an idle session). The time
+// decides otherwise.
+function newer(a, b) {
+  if (!a) return b
+  if (!b) return a
+  const aBehind = isBehind(a.rateLimits, b.rateLimits)
+  const bBehind = isBehind(b.rateLimits, a.rateLimits)
+  if (aBehind !== bBehind) return aBehind ? b : a
+  return a.measuredAt > b.measuredAt ? a : b
+}
+
+// Whether some window in a is an earlier window than in b, or the same window used less
+function isBehind(a, b) {
+  return a.some((x) => {
+    const y = b.find((l) => l.kind === x.kind)
+    if (!y || x.resetsAt == null || y.resetsAt == null) return false
+    const gap = Date.parse(y.resetsAt) - Date.parse(x.resetsAt)
+    if (gap > SAME_WINDOW_MS) return true
+    return Math.abs(gap) <= SAME_WINDOW_MS && x.percentUsed < y.percentUsed
+  })
 }
 
 function statusOf(used) {
