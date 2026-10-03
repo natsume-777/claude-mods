@@ -1,22 +1,29 @@
-// The pane /token-ledger opens, the band above the prompt, and the handoff they both start.
+// The pane /token-ledger opens, the band above the prompt, and the handoff the pane and the
+// band start.
 //
 // The pane is one, its view ($.state `view`) switching what it draws, since a second pane
-// opened from a button may not come to the front. Each view is a table of one-line rows;
-// a row's [▸] opens its details under it ($.state `open`, one row per view). Everything is
+// opened from a button may not come to the front. Its first view, 状況, says in plain words
+// where the session stands and what to do; the others are tables of one-line rows, a row's
+// [▸] opening its details under it ($.state `open`, one row per view). Everything is
 // aggregated afresh from $.state at each drawing, and the drawing reads that state, so a new
-// request redraws it; nothing here calls $.ui.invalidate.
+// request redraws it; nothing here calls $.ui.invalidate (register.js redraws at the cache's
+// two edges only, since every redraw rebuilds every mod's drawing in the desktop app).
 //
-// The band shows only when it is worth a look (aggregate.js summaryForBand: a fresh session
-// pays back within 10 requests, the context is heavy, or the cache nears its end while idle),
-// or while a handoff is under way. What mods beneath draw in the band (usage-band) stays
-// under it.
+// The band shows whenever the main context is known: a gauge with no number of how far the
+// context is from where a handoff pays (ledger.js gaugeOf, drawn by meter.js), the stage's
+// word and [詳しく], all on one line; a short phrase and [引き継ぐ…] join it only when there is
+// something to do. On a narrow line it gives way as meter.js fitMeter says, without a redraw
+// of its own: a change of width draws it again.
+// What mods beneath draw in the band (usage-band) stays under it.
 //
-// [引き継ぎ…] only fills the prompt box with a draft asking the model to write a handoff and
+// [引き継ぐ…] only fills the prompt box with a draft asking the model to write a handoff and
 // open a new session; the person reads it and decides whether to send it.
 
 import { aggregateThreads, TYPES, clockOf } from './aggregate.js'
 import {
   VIEWS,
+  ADVICE,
+  gauge,
   ESTIMATE_NOTE,
   WEIGHTS_NOTE,
   handoffKey,
@@ -35,11 +42,12 @@ import {
   handoffDraft,
 } from './ledger.js'
 import { SPACE, COLOR, BUTTON, choice, dim, inline, cell, slot, tableRow, field, section, details, page } from './style.js'
+import { fitMeter, meterParts } from './meter.js'
 import { GRACE_MS, guardDrawing, beginPress, hasStarted, takeOver, endPress } from './press-guard.js'
 import { atom, read, update } from 'claude-code'
 
 // The state this file reads and writes (declared in types/index.d.ts)
-const view = atom({ plugin: 'token-ledger', key: 'view' }, 'overview')
+const view = atom({ plugin: 'token-ledger', key: 'view' }, 'status')
 const REQUESTS = { plugin: 'token-ledger', key: 'requests' }
 const THREADS = { plugin: 'token-ledger', key: 'threads' }
 const STARTED_AT = { plugin: 'token-ledger', key: 'startedAt' }
@@ -64,9 +72,10 @@ async function go($, id) {
   } catch {}
 }
 
+// Opens the pane at view `id`: /token-ledger and the band's [詳しく]
 async function openPane($, id) {
   await update($, view, () => id)
-  await $.ui.open({ id: 'token-ledger', title: TITLE })
+  return $.ui.open({ id: 'token-ledger', title: TITLE })
 }
 
 // Opens one row's details in a view, or closes them when pressed again
@@ -116,7 +125,9 @@ async function gather($, e) {
   const tz = localOffsetMinutes()
   const agg = aggregateThreads(toThreads(requests, threads), { tzOffsetMinutes: tz, top: 15 })
   const s = summarize(requests, now, { handoff: handoff?.status })
-  return { view: current, requests, threads, startedAt, open, handoff, incoming, now, tz, agg, s, width: e.props?.bodyColumns ?? 84 }
+  // The pane is not told whether a turn runs: the idle warning is left to the band
+  const g = gauge(s, { isWorking: true })
+  return { view: current, requests, threads, startedAt, open, handoff, incoming, now, tz, agg, s, g, surface: e.surface, width: widthOf(e) ?? 84 }
 }
 
 function drawHeader($, ui, d) {
@@ -146,6 +157,54 @@ function openButton($, ui, d, rowKey) {
 const num = (ui, width, text, props = {}) => cell(ui, width, text, props, 'flex-end')
 const head = (ui, width, text, align) => cell(ui, width, text, { dimColor: true }, align)
 const tokLine = (t) => TYPES.map((k) => `${TYPE_LABEL[k]} ${short(t[k])}`).join(' · ')
+
+// ----- 状況 -----
+
+// What each stage means and what to do, in plain words: [what it is, what to do]
+const STATUS_TEXT = {
+  ok: [
+    'まだ余裕があります。このまま続けて大丈夫です。',
+    '会話が長くなるほど、1 回のやり取りで使う量が増えます。目安が右端に近づいたら、新しいセッションに引き継ぐと節約になります。',
+  ],
+  soon: [
+    '会話が長くなってきました。',
+    'このまま続けるより、新しいセッションに引き継いだほうが使う量が少なく済むようになってきています。作業の区切りで [引き継ぐ…] を押してください。',
+  ],
+  switch: [
+    '会話がかなり長くなりました。',
+    '新しいセッションに引き継いだほうが、使う量が少なく済みます。今の区切りで [引き継ぐ…] を押してください。',
+  ],
+  expired: [
+    '休憩の間に割高になりました。',
+    'しばらく操作がなかったので、次の 1 回は会話全体を読み込み直すことになり、使う量が増えます。続きは新しいセッションのほうが安く済みます。[引き継ぐ…] を押してください。',
+  ],
+}
+
+function drawStatus($, ui, d) {
+  const { g } = d
+  const lines = []
+  if (g.percent == null) {
+    lines.push(dim(ui, 'status-empty', 'まだこのセッションの要求がありません。会話を始めると、ここに目安が出ます'))
+  } else {
+    // The page's padding and the section's indent come off the pane's width
+    const fit = fitMeter({ surface: d.surface, stage: g.stage, columns: d.width - 2 * SPACE.page - SPACE.indent })
+    lines.push(ui.Box({ key: 'status-meter', flexDirection: 'row', flexWrap: 'nowrap', columnGap: SPACE.inline, alignItems: 'center', children: meterParts(ui, d.surface, fit, g) }))
+    const [what, todo] = STATUS_TEXT[g.advice === 'expired' ? 'expired' : g.stage]
+    lines.push(ui.Box({ key: 'status-what', children: [ui.Text({ wrap: 'wrap', ...(g.stage === 'ok' ? {} : { bold: true }), children: [what] })] }))
+    lines.push(ui.Box({ key: 'status-todo', children: [ui.Text({ wrap: 'wrap', children: [todo] })] }))
+  }
+  if (d.handoff) lines.push(field(ui, 'status-handoff-state', '引き継ぎ', handoffState(d.handoff), 10))
+
+  const actions = []
+  if (d.handoff?.status === 'drafted') {
+    actions.push(ui.Button({ key: 'status-cancel', label: '取り消す', ...BUTTON.minor, onPress: () => cancelHandoff($) }))
+  } else if (!d.handoff && g.advice) {
+    actions.push(ui.Button({ key: 'status-handoff', label: '引き継ぐ…', ...BUTTON.main, onPress: () => startHandoff($) }))
+  }
+  actions.push(ui.Button({ key: 'status-details', label: '詳しい数字', ...BUTTON.nav, onPress: () => go($, 'overview') }))
+  actions.push(ui.Button({ key: 'status-about-handoff', label: '引き継ぎについて', ...BUTTON.nav, onPress: () => go($, 'handoff') }))
+  return [section(ui, 'status', '今の状況', lines), inline(ui, 'status-actions', actions)]
+}
 
 // ----- 概要 -----
 function drawOverview($, ui, d) {
@@ -400,13 +459,13 @@ function drawHandoff($, ui, d) {
     dim(
       ui,
       'handoff-about',
-      '[引き継ぎ…] は、引き継ぎ文を書いて新しいセッションを開くよう頼む文を、入力欄に入れるだけです。送るかどうかはあなたが決めます。新しいセッションを開く前にも、Claude があなたに確認します',
+      '[引き継ぐ…] は、引き継ぎ文を書いて新しいセッションを開くよう頼む文を、入力欄に入れるだけです。送るかどうかはあなたが決めます。新しいセッションを開く前にも、Claude があなたに確認します',
     ),
     section(ui, 'handoff-setup', '設定', [
       field(ui, 'handoff-dir', '置き場', getConfig().handoffDir),
       field(ui, 'handoff-premise', '前提', `初期文脈 ${short(freshCtx)}・基礎部分 ${short(baseCtx)}`),
     ]),
-    inline(ui, 'handoff-actions', [ui.Button({ key: 'handoff-start', label: '引き継ぎ…', ...BUTTON.main, onPress: () => startHandoff($) })]),
+    inline(ui, 'handoff-actions', [ui.Button({ key: 'handoff-start', label: '引き継ぐ…', ...BUTTON.main, onPress: () => startHandoff($) })]),
   ]
   const h = d.handoff
   if (h) {
@@ -449,50 +508,63 @@ function drawView($, ui, d) {
       return drawTools($, ui, d)
     case 'handoff':
       return drawHandoff($, ui, d)
-    default:
+    case 'overview':
       return drawOverview($, ui, d)
+    default:
+      return drawStatus($, ui, d)
   }
 }
 
 // ===== The band =====
 
-function drawBand($, ui, s, handoff) {
+// The cells across a drawing: the site's own width, else what the surface measured; null when
+// neither is known
+function widthOf(e) {
+  const n = e.props?.bodyColumns
+  if (typeof n === 'number' && n > 0) return n
+  const v = e.viewport?.columns
+  return typeof v === 'number' && v > 0 ? v : null
+}
+
+// The band, one line: the gauge, the stage's word, a short phrase and its button when there is
+// something to do (or a handoff under way), then [詳しく]. The longer details are the pane's.
+// null before the main context is known.
+function drawBand($, ui, s, g, surface, columns) {
   const { Box, Text, Button } = ui
-  const toPane = Button({ key: 'band-details', label: '詳細', ...BUTTON.nav, onPress: () => openPane($, s.handoff ? 'handoff' : 'overview') })
-  let text
-  let buttons
+  if (g.percent == null) return null
+  let phrase = null
+  let color = null
+  let action = null
   if (s.handoff === 'drafted') {
-    text = '引き継ぎの下書きを入力欄に入れました。送るかどうかはあなたが決めます'
-    buttons = [toPane, Button({ key: 'band-cancel', label: '取り消す', ...BUTTON.minor, onPress: () => cancelHandoff($) })]
+    phrase = '引き継ぎの下書きを入力欄に入れました'
+    action = { key: 'band-cancel', label: '取り消す', ...BUTTON.minor, onPress: () => cancelHandoff($) }
   } else if (s.handoff === 'done') {
-    text = `引き継ぎ済み · 新しいセッションの初回 ${short(handoff?.observed?.[0])}（予測 ${short(handoff?.predictedCtx)}）`
-    buttons = [toPane]
-  } else {
-    const be = s.breakEven
-    text = s.isExpired
-      ? `キャッシュ切れ · 次の1回で再書込 ≈${short(be.rewrite)}* · 新規なら今が安い`
-      : `次の1回 ≈${short(be.next)}* · 切れたら再書込 ≈${short(be.rewrite)}* · 新規なら ${be.runs} 回で回収`
-    buttons = [toPane, Button({ key: 'band-handoff', label: '引き継ぎ…', ...BUTTON.main, onPress: () => startHandoff($) })]
+    phrase = '引き継ぎ済み'
+  } else if (g.advice) {
+    phrase = ADVICE[g.advice]
+    color = g.advice === 'expired' || g.advice === 'switch' ? COLOR.bad : COLOR.warn
+    action = { key: 'band-handoff', label: '引き継ぐ…', ...BUTTON.main, onPress: () => startHandoff($) }
   }
-  const color = s.isExpired || s.isHeavy ? { color: COLOR.warn } : {}
-  return Box({
-    key: 'token-ledger-band',
-    flexDirection: 'column',
-    children: [
-      Box({
-        key: 'band-line',
-        flexDirection: 'row',
-        columnGap: SPACE.column,
-        alignItems: 'center',
-        flexWrap: 'wrap',
-        children: [Text({ ...color, wrap: 'wrap', children: [text] }), ...buttons],
-      }),
-      s.handoff ? null : Text({ dimColor: true, children: [ESTIMATE_NOTE] }),
-    ],
-  })
+  const actions = [...(action ? [action] : []), { key: 'band-details', label: '詳しく', ...BUTTON.nav, onPress: () => openPane($, 'status') }]
+
+  const fit = fitMeter({ surface, stage: g.stage, columns, phrase, buttons: actions.map((a) => a.label) })
+  const children = meterParts(ui, surface, fit, g)
+  if (fit.hasPhrase) {
+    children.push(Box({ key: 'band-sep', flexShrink: 0, children: [Text({ dimColor: true, children: ['·'] })] }))
+    // The only part that shrinks: cut with an ellipsis, never wrapped
+    children.push(Box({ key: 'band-phrase', flexShrink: 1, minWidth: 0, children: [Text({ wrap: 'truncate-end', ...(color ? { color } : {}), children: [phrase] })] }))
+  }
+  children.push(...actions.map((a) => Box({ key: a.key + '-slot', flexShrink: 0, children: [Button(a)] })))
+  return Box({ key: 'token-ledger-band', flexDirection: 'row', flexWrap: 'nowrap', columnGap: 1, alignItems: 'center', children })
 }
 
 export function registerPane(on) {
+  // /token-ledger opens the pane at its first view, 状況
+  on('command.run', { command: 'token-ledger' }, async ($) => {
+    const opened = await openPane($, 'status')
+    return { text: opened.isPlaced ? 'トークンの内訳を開きました' : 'トークンの内訳を開きました（まだ表示されていません）' }
+  })
+
   on('ui.render', { component: 'Pane', requestId: 'token-ledger' }, async ($, e) => {
     const guard = guardDrawing(e.requestId)
     const ui = guard.wrap($.ui.resolve(e))
@@ -505,18 +577,18 @@ export function registerPane(on) {
     if (!getConfig().showBand || e.props.hasSurvey) return rest
     const { value: requests } = await $.state.get(REQUESTS)
     const { value: handoff } = await $.state.get(HANDOFF)
-    const s = summarize(requests, await $.clock.now(), { isWorking: e.props.isWorking, handoff: handoff?.status })
-    if (!s.show) return rest
+    const s = summarize(requests, await $.clock.now(), { handoff: handoff?.status })
     const ui = $.ui.resolve(e)
-    const mine = drawBand($, ui, s, handoff)
+    const mine = drawBand($, ui, s, gauge(s, { isWorking: e.props.isWorking }), e.surface, widthOf(e))
+    if (!mine) return rest
     if (!rest) return mine
     return ui.Box({ flexDirection: 'column', children: [mine, rest] })
   })
 
-  // A press on this mod's elements (the pane and the band). On the pane (press-guard.js) it
-  // also checks that the press reached the Button's onPress; when the chain settled, threw, or
-  // stayed silent for GRACE_MS without it, the press runs once with the latest drawing's
-  // closure under the same key.
+  // A press on this mod's elements (the pane and the band). On the pane
+  // (press-guard.js) it also checks that the press reached the Button's onPress; when the chain
+  // settled, threw, or stayed silent for GRACE_MS without it, the press runs once with the
+  // latest drawing's closure under the same key.
   on('ui.press', { plugin: 'token-ledger' }, async ($, e, next) => {
     const record = beginPress(e)
     const chain = next(e).then(

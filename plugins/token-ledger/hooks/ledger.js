@@ -4,7 +4,7 @@
 //
 // Pure: no $ here, so the hook files keep every $ call themselves.
 
-import { summaryForBand, isoString } from './aggregate.js'
+import { summaryForBand, contextForRuns, IDLE_WARN_MS, isoString } from './aggregate.js'
 
 /** The pane's id ($.ui.open, the Pane matcher) and the slash command's name. */
 export const PANE = 'token-ledger'
@@ -24,6 +24,7 @@ export const WEIGHTS_NOTE =
 
 /** The pane's views, in the order of its navigation. */
 export const VIEWS = [
+  { id: 'status', label: '状況' },
   { id: 'overview', label: '概要' },
   { id: 'threads', label: 'スレッド' },
   { id: 'kinds', label: '種類・モデル' },
@@ -80,8 +81,60 @@ export function assumed() {
 }
 
 /** summaryForBand with the options and observations filled in. */
-export function summarize(requests, now, { isWorking = false, handoff } = {}) {
-  return summaryForBand(requests ?? [], { now, ttlMain: config.ttlMain, ...assumed(), isWorking, handoff })
+export function summarize(requests, now, { handoff } = {}) {
+  return summaryForBand(requests ?? [], { now, ttlMain: config.ttlMain, ...assumed(), handoff })
+}
+
+// ---- The gauge: how long the session can go on before a handoff pays
+
+/** The gauge is full where a fresh session pays back within this many requests. */
+export const FULL_RUNS = 5
+/** At or above this percentage of the gauge, the stage is 'soon'. */
+export const SOON_PERCENT = 60
+
+/** The stages' words, for the band and the pane. */
+export const STAGE_LABEL = { ok: 'OK', soon: 'Soon', switch: 'Switch' }
+
+/**
+ * The band's short phrases, by gaugeOf's `advice`. The band stays one line; the pane's 状況
+ * view says the same in full sentences.
+ */
+export const ADVICE = {
+  soon: '区切りで引き継ぐと節約に',
+  switch: '今引き継ぐと節約に',
+  idle: '10 分操作がないと割高に',
+  expired: '続きは新しいセッションが安い',
+}
+
+/**
+ * Where the main context sits on the gauge, from summaryForBand's `s`.
+ * opts: { freshCtx, baseCtx, ttl, isWorking }
+ *   percent  0 at a fresh session's context, 100 at contextForRuns(FULL_RUNS), linear between;
+ *            100 once the cache expired (when a fresh session is smaller at all); null with no
+ *            main request yet
+ *   stage    'ok' below SOON_PERCENT, 'soon' below 100, 'switch' at 100
+ *   advice   which ADVICE phrase to show, or null: expired, else idle in the cache's last ten
+ *            minutes, else the stage's own ('soon', 'switch')
+ * A context no larger than a fresh session's stays at 0 and never advises: a fresh session
+ * would not be cheaper.
+ */
+export function gaugeOf(s, { freshCtx, baseCtx, ttl = '1h', isWorking = false }) {
+  const full = contextForRuns({ runs: FULL_RUNS, base: baseCtx, fresh: freshCtx, ttl })
+  if (s?.context == null) return { percent: null, stage: null, advice: null, fullAt: full }
+  const pays = s.context > freshCtx
+  let percent = pays ? Math.min(100, (100 * (s.context - freshCtx)) / (full - freshCtx)) : 0
+  if (pays && s.isExpired) percent = 100
+  const stage = percent >= 100 ? 'switch' : percent >= SOON_PERCENT ? 'soon' : 'ok'
+  let advice = null
+  if (pays && s.isExpired) advice = 'expired'
+  else if (pays && !isWorking && s.remainingMs != null && s.remainingMs <= IDLE_WARN_MS) advice = 'idle'
+  else if (stage !== 'ok') advice = stage
+  return { percent, stage, advice, fullAt: full }
+}
+
+/** gaugeOf with the options and observations filled in. */
+export function gauge(s, { isWorking = false } = {}) {
+  return gaugeOf(s, { ...assumed(), ttl: config.ttlMain, isWorking })
 }
 
 /** Appends one request, dropping the oldest beyond MAX_REQUESTS. */
@@ -183,19 +236,6 @@ export function localOffsetMinutes() {
   }
 }
 
-/**
- * The footer's line, `ctx 370k · 新規◎4回`: the main thread's context, then what a fresh
- * session would take to pay back (◎今 once the cache expired), or the handoff's state.
- */
-export function footerText(s) {
-  let text = 'ctx ' + short(s.context)
-  if (s.handoff === 'done') return text + ' · 引き継ぎ済み'
-  if (s.handoff === 'drafted') return text + ' · 引き継ぎ中'
-  const be = s.breakEven
-  if (be?.applies) text += be.runs === 0 ? ' · 新規◎今' : ` · 新規◎${be.runs > 99 ? '99+' : be.runs}回`
-  return text
-}
-
 // ---- Handoff
 
 /** The marker the new session's first message carries. */
@@ -220,7 +260,7 @@ export function handoffFile(dir, now, tzOffsetMinutes) {
   return `${base}/handoff-${stamp(now, tzOffsetMinutes)}.md`
 }
 
-/** The prompt the band's and the pane's [引き継ぎ…] put in the prompt box. Never sent by the mod. */
+/** The prompt the band's and the pane's [引き継ぐ…] put in the prompt box. Never sent by the mod. */
 export function handoffDraft({ file, id }) {
   return [
     `${file} に引き継ぎ文を書いてください。`,

@@ -32,7 +32,7 @@ export type TokenLedgerThread = {
 }
 
 /** The pane's views. */
-export type TokenLedgerView = 'overview' | 'threads' | 'kinds' | 'costly' | 'gaps' | 'tools' | 'handoff'
+export type TokenLedgerView = 'status' | 'overview' | 'threads' | 'kinds' | 'costly' | 'gaps' | 'tools' | 'handoff'
 
 /** A handoff this session drafted: 'drafted' once the prompt box holds it, 'done' once a new session reported in. */
 export type TokenLedgerHandoff = {
@@ -64,7 +64,7 @@ declare module 'claude-code' {
       threads: Record<string, TokenLedgerThread>
       /** When counting started (the first load in this session), epoch ms. */
       startedAt: number
-      /** Unset means 'overview'. */
+      /** Unset means 'status'. */
       view: TokenLedgerView
       /** The row whose details are open, by view; '' or unset means none. */
       open: StateFamily<string>

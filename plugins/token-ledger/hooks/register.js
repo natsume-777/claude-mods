@@ -3,11 +3,13 @@
 // register.js  the events: each model request (turn.step) into $.state, which subagent is
 //              which ($.agent.list, classic.SubagentStart, the Agent tool's result), a
 //              finished subagent's requests read back from its transcript, the handoff marker
-//              in a new session's first prompt, the timers, /token-ledger
-// footer.js    the footer line beside the model name: `ctx 370k · 新規◎4回`
-// pane.js      the pane (one, with views), the band above the prompt, and [引き継ぎ…]
+//              in a new session's first prompt, the timers, /token-ledger's registration
+// pane.js      the pane (one, with views), /token-ledger, the band above the prompt, and
+//              [引き継ぐ…]
+// meter.js     the gauge line `トークン ■■■□□ OK`, drawn as usage-band draws its meters (pure)
 // aggregate.js the aggregation and the break-even (pure; also used outside the mod)
-// ledger.js    options, formatting, threads, the handoff's draft and marker (pure)
+// ledger.js    options, the gauge's stage and advice, formatting, threads, the handoff's draft
+//              and marker (pure)
 // style.js     the shared look (pure)
 // press-guard.js  runs a pane press again that did not reach its Button (pure)
 //
@@ -29,7 +31,6 @@ import {
   summarize,
   assumed,
 } from './ledger.js'
-import { registerFooter } from './footer.js'
 import { registerPane } from './pane.js'
 import { update } from 'claude-code'
 
@@ -37,7 +38,6 @@ import { update } from 'claude-code'
 const REQUESTS = { plugin: 'token-ledger', key: 'requests' }
 const THREADS = { plugin: 'token-ledger', key: 'threads' }
 const STARTED_AT = { plugin: 'token-ledger', key: 'startedAt' }
-const VIEW = { plugin: 'token-ledger', key: 'view' }
 const HANDOFF = { plugin: 'token-ledger', key: 'handoff' }
 const INCOMING = { plugin: 'token-ledger', key: 'incoming' }
 
@@ -83,13 +83,6 @@ export function register(on, options) {
     watcher?.cancel()
     watcher = $.clock.every(WATCH_MS, () => void watchHandoff($))
     return next(e)
-  })
-
-  // /token-ledger opens the pane at its overview
-  on('command.run', { command: 'token-ledger' }, async ($) => {
-    await $.state.set(VIEW, 'overview')
-    const opened = await $.ui.open({ id: 'token-ledger', title: 'トークンの内訳' })
-    return { text: opened.isPlaced ? 'トークンの内訳を開きました' : 'トークンの内訳を開きました（まだ表示されていません）' }
   })
 
   // One model request, of the main thread or a subagent; its result goes on unchanged
@@ -144,9 +137,8 @@ export function register(on, options) {
     return next(e)
   })
 
-  // The pane and the band are registered before the footer; none of them depends on order
+  // The pane, /token-ledger and the band
   registerPane(on)
-  registerFooter(on)
 }
 
 // ---- The live tally
@@ -197,8 +189,10 @@ async function saveObserved($, patch) {
   await $.store.set(OBSERVED_KEY, value)
 }
 
-// Redraws the footer and the band when the main cache reaches its last ten minutes and when
-// it expires, since what they show changes then without a new request
+// Redraws the band and the pane when the main cache reaches its last ten minutes and when it
+// expires, since what they show changes then without a new request. Nothing else redraws on a
+// timer: in the desktop app every redraw rebuilds every mod's drawing, other mods' open panes
+// included
 function scheduleEdges($, requests, now) {
   edgeTimer?.cancel()
   edgeTimer = null

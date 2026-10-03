@@ -1,4 +1,4 @@
-// The value cache-timer keeps in $.state for the session.
+// The values cache-timer keeps in $.state for the session.
 
 declare module 'claude-code' {
   interface PluginState {
@@ -8,6 +8,11 @@ declare module 'claude-code' {
        * completed, in milliseconds since the epoch. Unset before the first such request.
        */
       lastRequest: number
+      /**
+       * The time of the countdown's last one-second tick, in milliseconds since the epoch.
+       * Written only to draw the footer again; unset before the first tick.
+       */
+      tick: number
     }
   }
 }

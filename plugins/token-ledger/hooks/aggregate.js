@@ -314,11 +314,9 @@ export function aggregateThreads(threads, opts = {}) {
 // ---- Live use (token-ledger): one turn.step result, the break-even, the band's summary
 
 const TTL_MS = { '5m': 300000, '1h': 3600000 };
-/** Context at or above this is "heavy": the footer turns to the warning color, the band shows. */
+/** Context at or above this is "heavy": the pane's overview marks it. */
 export const HEAVY_CONTEXT = 300000;
-/** The band shows while a fresh session pays back within this many requests. */
-export const SHOW_RUNS = 10;
-/** The band shows while idle once the main cache has this much or less left. */
+/** The band warns while idle once the main cache has this much or less left. */
 export const IDLE_WARN_MS = 600000;
 /** Output tokens assumed for the one turn that writes the handoff. */
 export const HANDOFF_OUTPUT = 2000;
@@ -376,17 +374,30 @@ export function breakEven({ context, base, fresh, model, ttl = '1h', isExpired =
 }
 
 /**
- * What the footer and the band show, from the live requests.
- * opts: { now, ttlMain, freshCtx, baseCtx, isWorking, handoff ('drafted' | 'done' | undefined) }
- * `show` is why the band shows ('handoff', 'runs', 'heavy', 'idle'), or null.
+ * The smallest context at which breakEven's runs come to `runs` or fewer (on a live cache),
+ * solved from fixed ≤ runs·saving. The model ratio cancels out, so no model is needed:
+ *   w·(n−b) + 0.1·r + 5·HANDOFF_OUTPUT ≤ runs·0.1·(r−n)
+ *   r ≥ (w·(n−b) + 5·HANDOFF_OUTPUT + runs·0.1·n) / ((runs−1)·0.1)
+ * Infinity for runs ≤ 1 (the handoff turn alone costs a request's read).
+ */
+export function contextForRuns({ runs = 5, base, fresh, ttl = '1h', weights = DEFAULT_WEIGHTS }) {
+  if (!(runs > 1)) return Infinity;
+  const T = weights.type;
+  const w = ttl === '5m' ? T.cache_write_5m : T.cache_write_1h;
+  const c = T.cache_read;
+  return (w * Math.max(0, fresh - base) + T.output * HANDOFF_OUTPUT + runs * c * fresh) / ((runs - 1) * c);
+}
+
+/**
+ * The main thread's state the band and the pane draw from, from the live requests.
+ * opts: { now, ttlMain, freshCtx, baseCtx, handoff ('drafted' | 'done' | undefined) }
  */
 export function summaryForBand(requests, opts = {}) {
   let last = null;
   for (const q of requests) if (q.thread === 'main' && (!last || q.ts >= last.ts)) last = q;
   const ttlMs = TTL_MS[opts.ttlMain] || TTL_MS['1h'];
   const out = { context: null, model: null, lastMainAt: null, expiresAt: null, remainingMs: null,
-    isExpired: false, isHeavy: false, breakEven: null, handoff: opts.handoff || null, show: null };
-  if (opts.handoff) out.show = 'handoff';
+    isExpired: false, isHeavy: false, breakEven: null, handoff: opts.handoff || null };
   if (!last) return out;
   const now = opts.now ?? last.ts;
   out.context = ctxOfTok(last.tok);
@@ -398,10 +409,5 @@ export function summaryForBand(requests, opts = {}) {
   out.isHeavy = out.context >= HEAVY_CONTEXT;
   out.breakEven = breakEven({ context: out.context, base: opts.baseCtx ?? 40000, fresh: opts.freshCtx ?? 70000,
     model: last.model, ttl: opts.ttlMain || '1h', isExpired: out.isExpired });
-  if (out.show) return out;
-  const be = out.breakEven;
-  if (be.applies && be.runs <= SHOW_RUNS) out.show = 'runs';
-  else if (be.applies && out.isHeavy) out.show = 'heavy';
-  else if (be.applies && !opts.isWorking && out.remainingMs <= IDLE_WARN_MS) out.show = 'idle';
   return out;
 }

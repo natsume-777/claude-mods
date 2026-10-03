@@ -1,6 +1,6 @@
 {
   "name": "cache-timer",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Shows how long the prompt cache has left, next to the model name in the footer",
   "author": { "name": "Natsume777" },
   "types": "./types/index.d.ts",
