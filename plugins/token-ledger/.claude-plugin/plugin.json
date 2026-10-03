@@ -1,0 +1,47 @@
+{
+  "name": "token-ledger",
+  "version": "0.1.0",
+  "description": "Shows where the session's tokens go and when a fresh session would be cheaper",
+  "author": { "name": "Natsume777" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "ttlMain": {
+      "type": "string",
+      "title": "主スレッドのキャッシュ有効期間",
+      "description": "主スレッドのキャッシュ書き込みを 5m（5 分）と 1h（1 時間）のどちらで数えるか",
+      "options": ["1h", "5m"],
+      "default": "1h"
+    },
+    "ttlSub": {
+      "type": "string",
+      "title": "サブエージェントのキャッシュ有効期間",
+      "description": "サブエージェントのキャッシュ書き込みを 5m（5 分）と 1h（1 時間）のどちらで数えるか",
+      "options": ["5m", "1h"],
+      "default": "5m"
+    },
+    "freshCtx": {
+      "type": "number",
+      "title": "新しいセッションの初期文脈",
+      "description": "引き継いだ新しいセッションの最初の文脈（トークン数）の見込み。引き継ぎの実測があればそちらを使う",
+      "default": 70000
+    },
+    "baseCtx": {
+      "type": "number",
+      "title": "基礎部分の文脈",
+      "description": "どのセッションにも入る部分（システムプロンプトやツールの説明など）のトークン数の見込み",
+      "default": 40000
+    },
+    "handoffDir": {
+      "type": "string",
+      "title": "引き継ぎ文の置き場",
+      "description": "引き継ぎ文を書くフォルダ（プロジェクトからの相対パス）",
+      "default": ".claude/handoffs/"
+    },
+    "showBand": {
+      "type": "boolean",
+      "title": "入力欄の上に帯を出す",
+      "description": "新しいセッションのほうが安くなりそうなとき、入力欄の上に帯を出す",
+      "default": true
+    }
+  }
+}

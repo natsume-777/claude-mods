@@ -19,6 +19,11 @@
       "name": "cache-timer",
       "source": "./plugins/cache-timer",
       "description": "Shows how long the prompt cache has left, next to the model name in the footer"
+    },
+    {
+      "name": "token-ledger",
+      "source": "./plugins/token-ledger",
+      "description": "Shows where the session's tokens go and when a fresh session would be cheaper"
     }
   ]
 }
