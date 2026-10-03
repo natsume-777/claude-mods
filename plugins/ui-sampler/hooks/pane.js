@@ -1,26 +1,38 @@
-// The pane /ui-sampler opens: where it is being drawn, then one entry per SITES row (what it
-// is, where it shows, its on/off switch, how often it was called, the props a render site last
-// received), with the choice of what [PromptHint], [Spinner] and [CommandOutput] write, and
-// buttons that call the one-shot $ APIs and open the element and dialog panes.
+// The pane /ui-sampler opens. One pane whose view ($.state `view`, session only) switches what
+// it draws, since a second pane opened from a button may not come to the front:
+//   'toc'          the table of contents: where it is drawn, one row per CATEGORIES entry
+//   a category id  that category's sites, one line apiece (label, on/off switch, call count,
+//                  the API's button, [詳細]), an API's last result under its line, and below
+//                  the list one detail block for the site picked with [詳細]: where it shows,
+//                  the choice of what [PromptHint], [Spinner] and [CommandOutput] write, the
+//                  call count by surface, the props a render site last received, the last result
+//   'samples'      the element samples, drawn by elements.js's hook, which wraps this one
+// /ui-sampler sets the view back to 'toc' (register.js), the way back from a view that does
+// not draw.
 
 import {
-  PANE,
-  ELEMENTS_PANE,
   DIALOG_OPEN,
+  CATEGORIES,
   SITES,
   KIND_LABEL,
   toggleValue,
   noteCall,
   callSummary,
+  callCount,
   lastProps,
   formatValue,
+  noteResult,
+  resultOf,
 } from './sites.js'
 import { atom, read, update } from 'claude-code'
 
-// The state this file reads and writes (declared in types/index.d.ts): one switch per site id,
-// which prop [PromptHint], [Spinner] and [CommandOutput] write, and [DialogPane]'s echo lines
-// (which entry opened it)
+// The state this file reads and writes (declared in types/index.d.ts): the pane's view, one
+// switch per site id, the site each category view details (by category id), which prop
+// [PromptHint], [Spinner] and [CommandOutput] write, and [DialogPane]'s echo lines (which entry
+// opened it)
+const view = atom({ plugin: 'ui-sampler', key: 'view' }, 'toc')
 const TOGGLES = { plugin: 'ui-sampler', key: 'toggles' }
+const SELECTED = { plugin: 'ui-sampler', key: 'selected' }
 const ECHO = { plugin: 'ui-sampler', key: 'echo' }
 const promptHintMode = atom({ plugin: 'ui-sampler', key: 'promptHintMode' }, 'hint')
 const spinnerMode = atom({ plugin: 'ui-sampler', key: 'spinnerMode' }, 'word')
@@ -45,16 +57,8 @@ const MODE_CHOICES = {
   ],
 }
 
-// Module variables are enough for these: a reload starting them over does no harm
-let statusPresses = 0
-const results = {}
-
-// Element keys allow a plain set of characters; site ids carry '$', '.' and '/'
-const keyOf = (prefix, id) => prefix + '-' + id.replace(/[^A-Za-z0-9_-]/g, '_')
-
 /** The one-shot APIs: the text of each one's button, by site id. runAction does the call. */
 const ACTION_BUTTONS = {
-  ElementsPane: '部品の見本を開く',
   DialogPane: 'ダイアログ風に開く',
   '$.ui.status': 'ステータス行を書き換える',
   '$.ui.status/clear': 'ステータス行を消す',
@@ -70,22 +74,21 @@ const ACTION_BUTTONS = {
   '$.session.append': 'system 行を足す',
 }
 
+// A module variable is enough for this: a reload starting it over does no harm
+let statusPresses = 0
+
+// Element keys allow a plain set of characters; site ids carry '$', '.' and '/'
+const keyOf = (prefix, id) => prefix + '-' + id.replace(/[^A-Za-z0-9_-]/g, '_')
+
 // One function rather than a table of closures: the engine follows $ only into functions
 // declared in this file, called by name. `press` is the button's ui.press event.
 async function runAction($, id, press) {
   switch (id) {
-    // ===== [ElementsPane] $.ui.open({ id: 'ui-sampler-elements' }) =====
-    // A pane of its own, so a sample the surface refuses takes down that pane, not this one
-    case 'ElementsPane': {
-      const opened = await $.ui.open({ id: ELEMENTS_PANE, title: '[Pane] 部品の見本' })
-      return opened.isPlaced ? '開いた' : '開いたがまだ表示されていない: ' + opened.reason
-    }
-
     // ===== [DialogPane] $.ui.open({ id: 'ui-sampler-dialog', focus, closeOnEscape, holdToasts, rows }) =====
     // One of three entry points (also the band's button and /ui-sampler-dialog), all with
     // DIALOG_OPEN. The opener is written before the open so the pane's first drawing shows it.
     case 'DialogPane': {
-      await update($, { ...ECHO, id: 'DialogPane:openedBy' }, () => `本体パネルのボタン（ui.press、surface: ${press.surface}）`)
+      await update($, { ...ECHO, id: 'DialogPane:openedBy' }, () => `「ダイアログ」の一覧のボタン（ui.press、surface: ${press.surface}）`)
       const opened = await $.ui.open(DIALOG_OPEN)
       const result = opened.isPlaced ? 'isPlaced: true' : `isPlaced: false、reason: ${opened.reason}`
       await update($, { ...ECHO, id: 'DialogPane:openResult' }, () => result)
@@ -160,13 +163,13 @@ async function runAction($, id, press) {
 
     // ===== [$.ui.scroll] $.ui.scroll({ in: 'ui-sampler', to: 'start' }) =====
     case '$.ui.scroll': {
-      const scrolled = await $.ui.scroll({ in: PANE, to: 'start' })
+      const scrolled = await $.ui.scroll({ in: 'ui-sampler', to: 'start' })
       return scrolled.deny ? '動かなかった: ' + scrolled.deny : '動いた（いちばん上へ）'
     }
 
     // ===== [$.ui.focus] $.ui.focus({ requestId: 'ui-sampler', key: 'refresh' }) =====
     case '$.ui.focus': {
-      const focused = await $.ui.focus({ requestId: PANE, key: 'refresh' })
+      const focused = await $.ui.focus({ requestId: 'ui-sampler', key: 'refresh' })
       return focused.deny ? '動かなかった: ' + focused.deny : '動いた（「回数を更新」ボタンへ）'
     }
 
@@ -192,6 +195,13 @@ function noteRender($, id, e) {
   if (noteCall(id, e.surface)) $.ui.invalidate('ui.render')
 }
 
+// Switches the pane's view from a press handler (never while drawing), and brings the new
+// view's top into sight
+async function go($, next) {
+  await update($, view, () => next)
+  await $.ui.scroll({ in: 'ui-sampler', to: 'start' })
+}
+
 // Reading the switch while drawing subscribes the pane, so a toggle redraws it
 async function isOn($, id) {
   return toggleValue(id, await read($, { ...TOGGLES, id }))
@@ -200,6 +210,16 @@ async function isOn($, id) {
 // Flips a switch from a press handler (never while drawing)
 function toggle($, id) {
   return update($, { ...TOGGLES, id }, value => !toggleValue(id, value))
+}
+
+// The site a category view details; reading it while drawing subscribes the pane
+async function selectedOf($, categoryId) {
+  return read($, { ...SELECTED, id: categoryId })
+}
+
+// Picks the site to detail, or clears the pick when it is pressed again (never while drawing)
+function select($, categoryId, siteId) {
+  return update($, { ...SELECTED, id: categoryId }, value => (value === siteId ? undefined : siteId))
 }
 
 // Reads the current choice of a site in MODE_CHOICES while drawing (subscribes the pane)
@@ -230,7 +250,7 @@ function setMode($, id, value) {
   }
 }
 
-/** The pane's lines for the props a render site last received, each against its note. */
+/** The detail lines for the props a render site last received, each against its note. */
 function propsLines(site) {
   const seen = lastProps(site.id)
   if (!seen) return ['受け取った props: まだ呼ばれていない']
@@ -244,110 +264,192 @@ function propsLines(site) {
   return lines
 }
 
+// ===== [Pane] view 'toc': the table of contents =====
+async function drawContents($, e) {
+  const { Box, Text, Button } = $.ui.resolve(e)
+  const dim = (key, text) => Text({ key, dimColor: true, wrap: 'wrap', children: [text] })
+  const row = (key, children) =>
+    Box({ key, flexDirection: 'row', columnGap: 1, alignItems: 'center', flexWrap: 'wrap', children })
+
+  // Where this drawing is, in two lines
+  const surfaces = await $.session.surfaces()
+  const viewport = e.viewport
+    ? `${e.viewport.columns} 桁 × ${e.viewport.rows} 行（isFullscreen: ${e.viewport.isFullscreen ?? '不明'}）`
+    : 'なし（まだ測られていない）'
+
+  // One row per category: name, count, [開く], then the description (which wraps)
+  const rows = CATEGORIES.map(category => {
+    const count = SITES.filter(site => site.category === category.id).length
+    return row('category-' + category.id, [
+      Text({ bold: true, children: [category.label] }),
+      Text({ dimColor: true, children: [category.isPending ? '未実装' : `${count} 件`] }),
+      category.isPending ? null : Button({ key: 'open-' + category.id, label: '開く', onPress: () => go($, category.id) }),
+      Text({ dimColor: true, wrap: 'wrap', children: [category.about] }),
+    ])
+  })
+
+  return Box({
+    flexDirection: 'column',
+    rowGap: 1,
+    width: '100%',
+    children: [
+      Text({ bold: true, children: ['[Pane] UI 見本市の目次'] }),
+      Box({
+        key: 'header',
+        flexDirection: 'column',
+        width: '100%',
+        children: [
+          dim('where-surface', `e.surface: ${e.surface} ／ $.session.surfaces(): ${surfaces.length > 0 ? surfaces.join(', ') : 'なし'}`),
+          dim('where-size', `e.viewport: ${viewport} ／ placement: ${e.props.placement}（本体 ${e.props.bodyColumns} 桁）`),
+        ],
+      }),
+      Box({ key: 'categories', flexDirection: 'column', rowGap: 1, width: '100%', children: rows }),
+      Button({ key: 'close', label: '閉じる', role: 'dismiss', onPress: () => $.ui.close({ id: 'ui-sampler' }) }),
+    ],
+  })
+}
+
+// ===== [Pane] view <category id>: one category's sites and the [詳細] of one =====
+async function drawCategory($, e, category) {
+  const sites = SITES.filter(site => site.category === category.id)
+  const { Box, Text, Button } = $.ui.resolve(e)
+  const redraw = () => $.ui.invalidate('ui.render')
+  // Explanations wrap at the pane's edge rather than run past it
+  const dim = (key, text) => Text({ key, dimColor: true, wrap: 'wrap', children: [text] })
+  const row = (key, children) =>
+    Box({ key, flexDirection: 'row', columnGap: 1, alignItems: 'center', flexWrap: 'wrap', children })
+
+  // ----- The list: one line per site, and an API's last result under its line -----
+  // Reading each switch and the pick here subscribes the pane, so a press redraws it
+  const picked = await selectedOf($, category.id)
+  const lines = []
+  for (const site of sites) {
+    const controls = [Text({ bold: true, children: [site.label] })]
+    if (site.toggleable) {
+      const isSiteOn = await isOn($, site.id)
+      controls.push(
+        Button({
+          key: keyOf('toggle', site.id),
+          label: isSiteOn ? 'オン' : 'オフ',
+          variant: isSiteOn ? 'primary' : 'secondary',
+          onPress: () => toggle($, site.id),
+        }),
+      )
+    }
+    controls.push(Text({ dimColor: true, children: [callCount(site.id)] }))
+    const actionLabel = ACTION_BUTTONS[site.id]
+    if (actionLabel) {
+      controls.push(
+        Button({
+          key: keyOf('run', site.id),
+          label: actionLabel,
+          onPress: async press => {
+            // A render site's count is its drawings, not the presses that open it
+            if (site.kind === 'api') noteCall(site.id, press.surface)
+            noteResult(site.id, await runAction($, site.id, press))
+            redraw()
+          },
+        }),
+      )
+    }
+    controls.push(
+      Button({
+        key: keyOf('detail', site.id),
+        label: '詳細',
+        variant: picked === site.id ? 'primary' : 'secondary',
+        onPress: () => select($, category.id, site.id),
+      }),
+    )
+    lines.push(row(keyOf('line', site.id), controls))
+    const result = resultOf(site.id)
+    if (result !== undefined) {
+      lines.push(
+        Text({ key: keyOf('result', site.id), dimColor: true, wrap: 'truncate-end', children: ['　結果: ' + result] }),
+      )
+    }
+  }
+
+  // ----- [詳細] The picked site's detail block -----
+  const detail = []
+  const site = sites.find(one => one.id === picked)
+  if (site) {
+    detail.push(
+      row('detail-heading', [
+        Text({ bold: true, children: [`${site.label} の詳細`] }),
+        Text({ dimColor: true, children: [KIND_LABEL[site.kind]] }),
+      ]),
+      Text({ key: 'detail-where', wrap: 'wrap', children: ['場所: ' + site.where] }),
+    )
+    const choices = MODE_CHOICES[site.id]
+    if (choices) {
+      const current = await modeOf($, site.id)
+      detail.push(
+        row('detail-modes', [
+          Text({ dimColor: true, children: ['書き方:'] }),
+          ...choices.map(choice =>
+            Button({
+              key: keyOf('mode-' + choice.value, site.id),
+              label: choice.label,
+              variant: choice.value === current ? 'primary' : 'secondary',
+              onPress: () => setMode($, site.id, choice.value),
+            }),
+          ),
+        ]),
+      )
+    }
+    detail.push(dim('detail-calls', '呼び出し: ' + callSummary(site.id)))
+    if (site.props) {
+      propsLines(site).forEach((text, index) => detail.push(dim('detail-props' + index, text)))
+    }
+    const result = resultOf(site.id)
+    if (result !== undefined) detail.push(dim('detail-result', '結果: ' + result))
+  }
+
+  // The elements category also leads to the samples view; a sample the surface refuses blanks
+  // that view only, and /ui-sampler brings back the contents
+  const nav = [
+    Button({ key: 'contents', label: '目次へ', onPress: () => go($, 'toc') }),
+    Button({ key: 'refresh', label: '回数を更新', onPress: redraw }),
+  ]
+  if (category.id === 'elements') {
+    nav.push(Button({ key: 'samples', label: '見本を見る', variant: 'primary', onPress: () => go($, 'samples') }))
+  }
+
+  return Box({
+    flexDirection: 'column',
+    rowGap: 1,
+    width: '100%',
+    children: [
+      Text({ bold: true, children: ['[Pane] ' + category.label] }),
+      dim('about', category.about),
+      row('nav', nav),
+      category.id === 'elements'
+        ? dim('samples-howto', '見本でパネルが真っ白になったら、/ui-sampler で目次に戻り、ここで [Pane/…] を 1 つずつオフにすると、どれが断られているか分かる')
+        : null,
+      Box({ key: 'list', flexDirection: 'column', width: '100%', children: lines }),
+      site
+        ? Box({
+            key: 'detail',
+            flexDirection: 'column',
+            width: '100%',
+            borderStyle: 'round',
+            paddingX: 1,
+            children: detail,
+          })
+        : dim('detail-none', '[詳細] を押すと、その項目の場所・受け取った値・結果がここに出る'),
+    ],
+  })
+}
+
 export function registerPane(on) {
   // ===== [Pane] ui.render { component: 'Pane', requestId: 'ui-sampler' } =====
-  // The matcher is PANE's value as a literal, so `plugin validate` can list it
+  // The matcher is PANE's value as a literal, so `plugin validate` can list it. The view
+  // 'samples' is answered by elements.js's hook on the same matcher, registered before this
+  // one so it is the outer link; it passes every other view on to here.
   on('ui.render', { component: 'Pane', requestId: 'ui-sampler' }, async ($, e) => {
     noteRender($, 'Pane', e)
-    const { Box, Text, Button } = $.ui.resolve(e)
-    const redraw = () => $.ui.invalidate('ui.render')
-    // Explanations wrap at the pane's edge rather than run past it
-    const dim = (key, text) => Text({ key, dimColor: true, wrap: 'wrap', children: [text] })
-    const row = children => Box({ flexDirection: 'row', columnGap: 1, alignItems: 'center', flexWrap: 'wrap', children })
-
-    // Where this drawing is: the surface asking, its size, and every surface of the session
-    const surfaces = await $.session.surfaces()
-    const viewport = e.viewport
-      ? `${e.viewport.columns} 桁 × ${e.viewport.rows} 行（isFullscreen: ${e.viewport.isFullscreen ?? '不明'}）`
-      : 'なし（まだ測られていない）'
-    const header = Box({
-      key: 'header',
-      flexDirection: 'column',
-      width: '100%',
-      children: [
-        dim('surface', 'e.surface: ' + e.surface),
-        dim('viewport', 'e.viewport: ' + viewport),
-        dim('placement', `e.props.placement: ${e.props.placement}（本体の幅 ${e.props.bodyColumns} 桁）`),
-        dim('surfaces', '$.session.surfaces(): ' + (surfaces.length > 0 ? surfaces.join(', ') : 'なし')),
-      ],
-    })
-
-    // One entry per site. Reading each switch and choice here subscribes the pane, so a press
-    // redraws it.
-    const entries = []
-    for (const site of SITES) {
-      const actionButton = ACTION_BUTTONS[site.id]
-      const isSiteOn = await isOn($, site.id)
-      const controls = [
-        Text({ bold: true, children: [site.label] }),
-        Text({ dimColor: true, children: [KIND_LABEL[site.kind]] }),
-      ]
-      if (site.toggleable) {
-        controls.push(
-          Button({
-            key: keyOf('toggle', site.id),
-            label: isSiteOn ? 'オン' : 'オフ',
-            variant: isSiteOn ? 'primary' : 'secondary',
-            onPress: () => toggle($, site.id),
-          }),
-        )
-      }
-      if (actionButton) {
-        controls.push(
-          Button({
-            key: keyOf('run', site.id),
-            label: actionButton,
-            onPress: async press => {
-              // A render site's count is its drawings, not the presses that open it
-              if (site.kind === 'api') noteCall(site.id, press.surface)
-              results[site.id] = await runAction($, site.id, press)
-              redraw()
-            },
-          }),
-        )
-      }
-
-      const lines = [row(controls), dim(keyOf('where', site.id), '場所: ' + site.where)]
-      const choices = MODE_CHOICES[site.id]
-      if (choices) {
-        const current = await modeOf($, site.id)
-        lines.push(
-          row([
-            Text({ dimColor: true, children: ['書き方:'] }),
-            ...choices.map(choice =>
-              Button({
-                key: keyOf('mode-' + choice.value, site.id),
-                label: choice.label,
-                variant: choice.value === current ? 'primary' : 'secondary',
-                onPress: () => setMode($, site.id, choice.value),
-              }),
-            ),
-          ]),
-        )
-      }
-      lines.push(dim(keyOf('calls', site.id), '呼び出し: ' + callSummary(site.id)))
-      if (site.props) {
-        propsLines(site).forEach((text, index) => lines.push(dim(keyOf('props' + index, site.id), text)))
-      }
-      if (results[site.id] !== undefined) lines.push(dim(keyOf('result', site.id), '結果: ' + results[site.id]))
-
-      entries.push(Box({ key: keyOf('site', site.id), flexDirection: 'column', width: '100%', children: lines }))
-    }
-
-    return Box({
-      flexDirection: 'column',
-      rowGap: 1,
-      width: '100%',
-      children: [
-        Text({ bold: true, children: ['[Pane] ここがパネルです'] }),
-        header,
-        row([
-          Text({ bold: true, children: ['一覧'] }),
-          Button({ key: 'refresh', label: '回数を更新', onPress: redraw }),
-        ]),
-        ...entries,
-        Button({ key: 'close', label: '閉じる', role: 'dismiss', onPress: () => $.ui.close({ id: PANE }) }),
-      ],
-    })
+    const current = await read($, view)
+    const category = CATEGORIES.find(one => one.id === current && !one.isPending)
+    return category ? drawCategory($, e, category) : drawContents($, e)
   })
 }

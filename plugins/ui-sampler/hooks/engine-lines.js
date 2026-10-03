@@ -38,7 +38,7 @@ async function echoOf($, id) {
 }
 
 // ===== [DialogPane] $.ui.open({ id: 'ui-sampler-dialog', ... }) from the band =====
-// One of three entry points (also the main pane's button and /ui-sampler-dialog), all with
+// One of three entry points (also the main pane's dialogs view button and /ui-sampler-dialog), all with
 // DIALOG_OPEN. The opener is written before the open so the pane's first drawing shows it.
 async function openDialogFromBand($, press) {
   await echoTo($, 'DialogPane:openedBy', `[AbovePrompt] の帯のボタン（ui.press、surface: ${press.surface}）`)

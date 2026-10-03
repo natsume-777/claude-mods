@@ -1,5 +1,5 @@
 // The dialog-style pane: opened with $.ui.open's dialog options (focus, closeOnEscape,
-// holdToasts, rows) from three entry points (the main pane's button, the [AbovePrompt] band's
+// holdToasts, rows) from three entry points (the main pane's dialogs view button, the [AbovePrompt] band's
 // button, /ui-sampler-dialog). Its contents say which entry opened it and where the surface
 // seated it, what each option asks for, and give something to try it with: an Input that
 // should hold the keys, a toast button for holdToasts, and a close button.
@@ -10,7 +10,7 @@ import { read, update } from 'claude-code'
 // The state this file reads and writes (declared in types/index.d.ts): its echo lines
 const ECHO = { plugin: 'ui-sampler', key: 'echo' }
 
-// Counts the call, and redraws once (the index's counts) when a site or surface is new
+// Counts the call, and redraws once (the pane's counts) when a site or surface is new
 function noteRender($, id, e) {
   if (noteCall(id, e.surface)) $.ui.invalidate('ui.render')
 }

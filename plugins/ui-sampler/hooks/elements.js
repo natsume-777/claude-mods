@@ -1,13 +1,16 @@
-// The element pane: one labelled sample per 'element' row of SITES, drawn with the element
-// table of the surface asking. A tree the surface refuses is not drawn at all, so the samples
-// live in a pane of their own (the index stays up) and each has its own on/off switch: switch
-// samples off until the pane shows, and the last one switched off is the one refused.
+// The samples view of the pane (view 'samples'): one labelled sample per 'element' row of
+// SITES, drawn with the element table of the surface asking. A tree the surface refuses is not
+// drawn at all, so the samples are a view of their own and each has an on/off switch, listed
+// in the elements category's view (pane.js), not here: /ui-sampler goes back to the contents, then
+// switch samples off until this view shows; the last one switched off is the one refused.
 
-import { ELEMENTS_PANE, SITES, toggleValue, noteCall } from './sites.js'
-import { read, update } from 'claude-code'
+import { SITES, toggleValue, noteCall } from './sites.js'
+import { atom, read, update } from 'claude-code'
 
-// The state this file reads and writes (declared in types/index.d.ts): one switch per site id,
-// and one echo line per sample (the last press, the typed text, the picked value)
+// The state this file reads and writes (declared in types/index.d.ts): the pane's view, one
+// switch per site id, and one echo line per sample (the last press, the typed text, the
+// picked value)
+const view = atom({ plugin: 'ui-sampler', key: 'view' }, 'toc')
 const TOGGLES = { plugin: 'ui-sampler', key: 'toggles' }
 const ECHO = { plugin: 'ui-sampler', key: 'echo' }
 
@@ -17,19 +20,21 @@ const PRESSABLE_HREF = 'https://example.com/press'
 // Element keys allow a plain set of characters; site ids carry '/'
 const keyOf = (prefix, id) => prefix + '-' + id.replace(/[^A-Za-z0-9_-]/g, '_')
 
-// Counts the call, and redraws once (the index's counts) when a site or surface is new
+// Counts the call, and redraws once (the category views' counts) when a site or surface is new
 function noteRender($, id, e) {
   if (noteCall(id, e.surface)) $.ui.invalidate('ui.render')
+}
+
+// Switches the pane's view from a press handler (never while drawing), and brings the new
+// view's top into sight
+async function go($, next) {
+  await update($, view, () => next)
+  await $.ui.scroll({ in: 'ui-sampler', to: 'start' })
 }
 
 // Reading the switch while drawing subscribes the pane, so a toggle redraws it
 async function isOn($, id) {
   return toggleValue(id, await read($, { ...TOGGLES, id }))
-}
-
-// Flips a switch from a press handler (never while drawing)
-function toggle($, id) {
-  return update($, { ...TOGGLES, id }, value => !toggleValue(id, value))
 }
 
 // Writes a sample's echo line from a handler (never while drawing)
@@ -221,7 +226,7 @@ async function drawSample($, table, id) {
             key: 'btn-dismiss',
             label: 'role: dismiss（このパネルを閉じる）',
             role: 'dismiss',
-            onPress: () => $.ui.close({ id: ELEMENTS_PANE }),
+            onPress: () => $.ui.close({ id: 'ui-sampler' }),
           }),
           note('デスクトップでは枠の端に閉じるボタンとして出る、と型定義にある'),
         ]),
@@ -354,36 +359,24 @@ async function drawSample($, table, id) {
 }
 
 export function registerElements(on) {
-  // ===== [ElementsPane] ui.render { component: 'Pane', requestId: 'ui-sampler-elements' } =====
-  // The matcher is ELEMENTS_PANE's value as a literal, so `plugin validate` can list it
-  on('ui.render', { component: 'Pane', requestId: 'ui-sampler-elements' }, async ($, e) => {
-    noteRender($, 'ElementsPane', e)
+  // ===== [Pane/samples] ui.render { component: 'Pane', requestId: 'ui-sampler' }, view 'samples' =====
+  // The same matcher as [Pane] (pane.js); registered before it, so this is the outer link and
+  // passes every other view on with next(e)
+  on('ui.render', { component: 'Pane', requestId: 'ui-sampler' }, async ($, e, next) => {
+    if ((await read($, view)) !== 'samples') return next(e)
+    noteRender($, 'Pane', e)
     const table = $.ui.resolve(e)
     const { Box, Text, Button } = table
     const dim = (key, text) => Text({ key, dimColor: true, wrap: 'wrap', children: [text] })
 
+    // Each sample under its label; a sample switched off says so. The switches are in the
+    // elements category's view, which draws whatever this view does
     const sections = []
     for (const site of SITES) {
       if (site.kind !== 'element') continue
-      const isSiteOn = await isOn($, site.id)
-      const heading = Box({
-        flexDirection: 'row',
-        columnGap: 1,
-        alignItems: 'center',
-        children: [
-          Text({ bold: true, children: [site.label] }),
-          Button({
-            key: keyOf('toggle', site.id),
-            label: isSiteOn ? 'オン' : 'オフ',
-            variant: isSiteOn ? 'primary' : 'secondary',
-            onPress: () => toggle($, site.id),
-          }),
-        ],
-      })
-
       let body
-      if (!isSiteOn) {
-        body = [dim(keyOf('off', site.id), 'オフにしてあるので描いていない')]
+      if (!(await isOn($, site.id))) {
+        body = [dim(keyOf('off', site.id), 'オフにしてあるので描いていない（「部品」の一覧で切り替える）')]
       } else if (typeof table[site.element] !== 'function') {
         body = [Text({ color: 'warning', children: [`${site.label} この surface にはない（表に ${site.element} がない）`] })]
       } else {
@@ -401,7 +394,7 @@ export function registerElements(on) {
           key: keyOf('sample', site.id),
           flexDirection: 'column',
           width: '100%',
-          children: [heading, dim(keyOf('where', site.id), site.where), ...body],
+          children: [Text({ bold: true, children: [site.label] }), dim(keyOf('where', site.id), site.where), ...body],
         }),
       )
     }
@@ -411,18 +404,26 @@ export function registerElements(on) {
       rowGap: 1,
       width: '100%',
       children: [
-        Text({ bold: true, children: ['[ElementsPane] 部品の見本'] }),
+        Text({ bold: true, children: ['[Pane/samples] 部品の見本'] }),
+        Box({
+          flexDirection: 'row',
+          columnGap: 1,
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          children: [
+            Button({ key: 'contents', label: '目次へ', onPress: () => go($, 'toc') }),
+            Button({ key: 'switches', label: '部品の一覧へ（オン・オフ）', onPress: () => go($, 'elements') }),
+          ],
+        }),
         Box({
           flexDirection: 'column',
           width: '100%',
           children: [
             dim('surface', 'e.surface: ' + e.surface),
             dim('table', '$.ui.resolve(e) の表: ' + Object.keys(table).join(', ')),
-            dim('howto', 'このパネルが出ないときは、最初のパネルの一覧で [Pane/…] を 1 つずつオフにすると、どれが断られているか分かる'),
           ],
         }),
         ...sections,
-        Button({ key: 'close', label: '閉じる', onPress: () => $.ui.close({ id: ELEMENTS_PANE }) }),
       ],
     })
   })

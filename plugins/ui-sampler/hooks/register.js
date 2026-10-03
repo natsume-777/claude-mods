@@ -3,21 +3,29 @@
 // the same label is the `id` of its SITES entry (sites.js) and heads the code that draws it.
 //
 // sites.js         the SITES table, the per-site switches ($.state) and the call counts
-// pane.js          [Pane]: where it is drawn, the SITES index, the one-shot API buttons
-// dialog.js        [DialogPane]: a pane opened with $.ui.open's dialog options
-// elements.js      [ElementsPane] [Pane/Text] [Pane/Box] ...: one sample per element, its own pane
+// pane.js          [Pane]: one pane whose view switches: the table of contents, or one category's
+//                  sites a line each with the [詳細] of one, and the one-shot API buttons
+// elements.js      [Pane/samples] [Pane/Text] [Pane/Box] ...: the pane's view of one sample per
+//                  element
+// dialog.js        [DialogPane]: a second pane, opened with $.ui.open's dialog options
 // engine-lines.js  [Spinner] [SessionMode] [PromptHint] [AbovePrompt] [CommandOutput]: the engine's
 //                  own lines, and the band above the prompt
+// transcript.js    [UserMessage] [AssistantMessage] [ToolUse] [ToolResult] [ToolGroup]: the
+//                  transcript's rows; [ToolProgress] [TurnDuration] [InfoNotice]: counted only
+// asks.js          [AskUserQuestion] [$.ui.notice]: the question dialog, the permission dialog
 
 import { COMMAND, DIALOG_COMMAND, DIALOG_OPEN, PANE, noteCall } from './sites.js'
 import { registerPane } from './pane.js'
 import { registerElements } from './elements.js'
 import { registerDialog } from './dialog.js'
 import { registerEngineLines } from './engine-lines.js'
-import { update } from 'claude-code'
+import { registerTranscript } from './transcript.js'
+import { registerAsks } from './asks.js'
+import { atom, update } from 'claude-code'
 
-// The state this file writes (declared in types/index.d.ts): [DialogPane]'s echo lines, which
-// say which entry opened it
+// The state this file writes (declared in types/index.d.ts): the pane's view, and
+// [DialogPane]'s echo lines, which say which entry opened it
+const view = atom({ plugin: 'ui-sampler', key: 'view' }, 'toc')
 const ECHO = { plugin: 'ui-sampler', key: 'echo' }
 
 export function register(on) {
@@ -33,15 +41,17 @@ export function register(on) {
   // ===== [command.run] on('command.run', { command: 'ui-sampler' }) =====
   // Its text becomes the transcript row [CommandOutput] draws (engine-lines.js). The matcher is
   // a literal (COMMAND's value) so `plugin validate` can list it; an imported const shows as `?`.
+  // It starts the pane at the contents, which is also the way back from a view that does not draw.
   on('command.run', { command: 'ui-sampler' }, async $ => {
     noteCall('command.run')
+    await update($, view, () => 'toc')
     const opened = await $.ui.open({ id: PANE, title: '[Pane] UI 見本市' })
     const placed = opened.isPlaced ? '' : `（まだ表示されていない: ${opened.reason}）`
     return { text: `[command.run] UI 見本パネルを開きました${placed}` }
   })
 
   // ===== [command.run] on('command.run', { command: 'ui-sampler-dialog' }) =====
-  // Another entry point for [DialogPane], beside the main pane's button and the band's: a
+  // Another entry point for [DialogPane], beside the main pane's dialogs view button and the band's: a
   // command the person typed, with the same open options (DIALOG_OPEN). The opener is written
   // before the open so the pane's first drawing shows it.
   on('command.run', { command: 'ui-sampler-dialog' }, async ($, e) => {
@@ -54,8 +64,12 @@ export function register(on) {
     return { text: `[command.run] /ui-sampler-dialog で [DialogPane] を開きました（${result}、presentation の ${where}）` }
   })
 
-  registerPane(on)
+  // registerElements before registerPane: both hook the pane, and the first registered is the
+  // outer link, so the samples view answers 'samples' and passes the rest to [Pane]
   registerElements(on)
+  registerPane(on)
   registerDialog(on)
   registerEngineLines(on)
+  registerTranscript(on)
+  registerAsks(on)
 }

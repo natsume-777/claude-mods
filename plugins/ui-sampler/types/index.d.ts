@@ -13,11 +13,21 @@ export type UiSamplerSpinnerMode = 'word' | 'message' | 'suffix' | 'tree' | 'pro
 /** How the [CommandOutput] hook draws: a tree of its own, or a rewrite of `text`. */
 export type UiSamplerCommandOutputMode = 'tree' | 'text'
 
+/**
+ * What the pane draws: the table of contents, one category's list (a CATEGORIES id), or the
+ * element samples.
+ */
+export type UiSamplerView = 'toc' | 'lines' | 'transcript' | 'dialogs' | 'api' | 'elements' | 'samples'
+
 declare module 'claude-code' {
   interface PluginState {
     'ui-sampler': {
       /** On/off per toggleable site, keyed by the site's id in SITES; unset means its default. */
       toggles: StateFamily<boolean>
+      /** Unset means 'toc'. */
+      view: UiSamplerView
+      /** The site id a category view shows the detail of, keyed by the category's id in CATEGORIES; unset means none. */
+      selected: StateFamily<string>
       /** Unset means 'hint'. */
       promptHintMode: UiSamplerPromptHintMode
       /** Unset means 'word'. */
