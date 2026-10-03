@@ -5,6 +5,7 @@
 
 import { DIALOG_OPEN, noteCall, noteProps, formatValue, toggleValue } from './sites.js'
 import { SPACE, BUTTON, dim, inline } from './style.js'
+import { noteDiag } from './diag.js'
 import { atom, read, update } from 'claude-code'
 
 // The state this file reads (declared in types/index.d.ts): one switch per site id, which
@@ -20,7 +21,9 @@ const commandOutputMode = atom({ plugin: 'ui-sampler', key: 'commandOutputMode' 
 function noteRender($, id, e) {
   const isNewCall = noteCall(id, e.surface)
   const isNewProps = noteProps(id, e)
-  if (isNewCall || isNewProps) $.ui.invalidate('ui.render')
+  if (!isNewCall && !isNewProps) return
+  noteDiag('invalidate', `${id} の${isNewCall ? '初回描画' : ' props が変わった'}`)
+  $.ui.invalidate('ui.render')
 }
 
 // Reading the switch while drawing subscribes the hook, so a press in the pane redraws it

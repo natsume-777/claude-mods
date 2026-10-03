@@ -6,6 +6,8 @@
 
 import { DIALOG_PANE, noteCall } from './sites.js'
 import { BUTTON, dim, inline, field, header, section, page } from './style.js'
+import { noteDiag } from './diag.js'
+import { guardDrawing } from './press-guard.js'
 import { read, update } from 'claude-code'
 
 // The state this file reads and writes (declared in types/index.d.ts): its echo lines
@@ -13,7 +15,9 @@ const ECHO = { plugin: 'ui-sampler', key: 'echo' }
 
 // Counts the call, and redraws once (the pane's counts) when a site or surface is new
 function noteRender($, id, e) {
-  if (noteCall(id, e.surface)) $.ui.invalidate('ui.render')
+  if (!noteCall(id, e.surface)) return
+  noteDiag('invalidate', `${id} の初回描画（新しい surface）`)
+  $.ui.invalidate('ui.render')
 }
 
 // Writes one of this pane's echo lines from a handler (never while drawing)
@@ -31,13 +35,15 @@ export function registerDialog(on) {
   // The matcher is DIALOG_PANE's value as a literal, so `plugin validate` can list it
   on('ui.render', { component: 'Pane', requestId: 'ui-sampler-dialog' }, async ($, e) => {
     noteRender($, 'DialogPane', e)
-    const ui = $.ui.resolve(e)
+    // The guard keeps this drawing's Button closures for [press/再実行] (press-guard.js)
+    const guard = guardDrawing(e.requestId)
+    const ui = guard.wrap($.ui.resolve(e))
     const { Button, Input } = ui
     const viewport = e.viewport
       ? `${e.viewport.columns} 桁 × ${e.viewport.rows} 行（isFullscreen: ${e.viewport.isFullscreen ?? '不明'}）`
       : 'なし（まだ測られていない）'
 
-    return page(ui, [
+    return guard.done(page(ui, [
       header(ui, {
         title: '[DialogPane] ダイアログ風のパネル',
         about: '$.ui.open のダイアログ向けのオプションを付けて開いたパネル。どこから開き、どこに置かれたかを示す',
@@ -87,6 +93,6 @@ export function registerDialog(on) {
         ),
         field(ui, 'try-toast', 'トースト', await echoOf($, 'DialogPane:toast')),
       ]),
-    ])
+    ]))
   })
 }

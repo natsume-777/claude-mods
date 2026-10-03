@@ -42,6 +42,8 @@ import {
   stateMark,
   table,
 } from './style.js'
+import { noteDiag, notePaneRender, diagLines, clearDiag } from './diag.js'
+import { GRACE_MS, guardDrawing, beginPress, hasStarted, takeOver, endPress } from './press-guard.js'
 import { atom, read, update } from 'claude-code'
 
 // The state this file reads and writes (declared in types/index.d.ts): the pane's view, one
@@ -210,7 +212,9 @@ async function runAction($, id, press) {
 
 // Counts the call, and redraws once when a site or surface is new
 function noteRender($, id, e) {
-  if (noteCall(id, e.surface)) $.ui.invalidate('ui.render')
+  if (!noteCall(id, e.surface)) return
+  noteDiag('invalidate', `${id} の初回描画（新しい surface）`)
+  $.ui.invalidate('ui.render')
 }
 
 // Switches the pane's view from a press handler (never while drawing), and brings the new
@@ -288,8 +292,9 @@ function propsEntries(site) {
 }
 
 // ===== [Pane] view 'toc': the table of contents =====
-async function drawContents($, e) {
-  const ui = $.ui.resolve(e)
+// `guard` (press-guard.js) keeps this drawing's Button closures for [press/再実行]
+async function drawContents($, e, guard) {
+  const ui = guard.wrap($.ui.resolve(e))
   const { Text, Button } = ui
 
   // Where this drawing is
@@ -337,11 +342,14 @@ async function drawContents($, e) {
 }
 
 // ===== [Pane] view <category id>: one category's sites and the [詳細] of one =====
-async function drawCategory($, e, category) {
+async function drawCategory($, e, category, guard) {
   const sites = SITES.filter(site => site.category === category.id)
-  const ui = $.ui.resolve(e)
+  const ui = guard.wrap($.ui.resolve(e))
   const { Box, Text, Button } = ui
-  const redraw = () => $.ui.invalidate('ui.render')
+  const redraw = () => {
+    noteDiag('invalidate', 'パネルのボタンから')
+    $.ui.invalidate('ui.render')
+  }
   const dash = () => Text({ dimColor: true, children: ['—'] })
 
   // ----- The list: one row per site, columns label · state · count · [詳細] · action -----
@@ -527,9 +535,55 @@ async function drawCategory($, e, category) {
     }),
     section(ui, 'list', '一覧', [table(ui, 'list-table', entries)]),
     section(ui, 'detail-section', '詳細', [detail]),
+    category.id === 'api' ? diagSection(ui, redraw) : null,
   ])
 }
 
+// ===== [診断/press] the press, focus and redraw log (diag.js), in the API view =====
+// What arrived around a press: ui.press and ui.focus as this mod's hooks saw them, each
+// drawing of this pane with e.props.isFocused, and each $.ui.invalidate this mod made. As of
+// this drawing; [記録を更新] draws it again.
+function diagSection(ui, redraw) {
+  const { Button } = ui
+  const lines = diagLines()
+  return section(ui, 'diag', '[診断/press] 押下・フォーカス・再描画の記録（新しい順）', [
+    dim(
+      ui,
+      'diag-about',
+      'press は ui.press フックに届いた押下と next(e) の結果、[press/再実行] は onPress まで届かなかった押下をこの mod が最新の描画で実行し直したこと、focus は ui.focus フック、render はこのパネルの描画、invalidate はこの mod が頼んだ再描画。表示はこの描画の時点のもので、[記録を更新] で最新になる',
+    ),
+    inline(ui, 'diag-nav', [
+      Button({ key: 'diag-refresh', label: '記録を更新', ...BUTTON.nav, onPress: redraw }),
+      Button({
+        key: 'diag-clear',
+        label: '記録を消す',
+        ...BUTTON.minor,
+        onPress: () => {
+          clearDiag()
+          redraw()
+        },
+      }),
+    ]),
+    lines.length > 0
+      ? ui.Box({
+          key: 'diag-lines',
+          flexDirection: 'column',
+          width: '100%',
+          children: lines.map((line, index) => ui.Text({ key: 'diag-line-' + index, wrap: 'wrap', children: [line] })),
+        })
+      : dim(ui, 'diag-empty', 'まだ何も記録されていない'),
+  ])
+}
+
+// What next(e) settled to, as one diag phrase: the value as JSON, or the error's text
+function describeOutcome(outcome) {
+  if (outcome.kind === 'error') return '例外: ' + errorText(outcome.error)
+  return '値: ' + (outcome.value === undefined ? 'undefined' : JSON.stringify(outcome.value))
+}
+
+function errorText(error) {
+  return String(error?.message ?? error)
+}
 
 export function registerPane(on) {
   // ===== [Pane] ui.render { component: 'Pane', requestId: 'ui-sampler' } =====
@@ -537,9 +591,76 @@ export function registerPane(on) {
   // 'samples' is answered by elements.js's hook on the same matcher, registered before this
   // one so it is the outer link; it passes every other view on to here.
   on('ui.render', { component: 'Pane', requestId: 'ui-sampler' }, async ($, e) => {
+    notePaneRender(e)
     noteRender($, 'Pane', e)
     const current = await read($, view)
     const category = CATEGORIES.find(one => one.id === current && !one.isPending)
-    return category ? drawCategory($, e, category) : drawContents($, e)
+    const guard = guardDrawing(e.requestId)
+    return guard.done(category ? await drawCategory($, e, category, guard) : await drawContents($, e, guard))
+  })
+
+  // ===== [診断/press] [press/再実行] ui.press { plugin: 'ui-sampler' } =====
+  // Watches every press on this mod's elements (both panes and the band), noting what next(e)
+  // resolved to or threw. On a guarded pane (press-guard.js) it also checks that the press
+  // reached the Button's onPress, judged by the wrapper around that onPress rather than by
+  // next(e)'s answer, which says only what the chain settled on. When the chain settled, threw,
+  // or stayed silent for GRACE_MS without the onPress having started, the press is run once
+  // with the closure the latest drawing holds under the same key.
+  on('ui.press', { plugin: 'ui-sampler' }, async ($, e, next) => {
+    noteDiag('press', `${e.element}（${e.component} ${e.requestId}、surface: ${e.surface}）`)
+    const record = beginPress(e)
+    const chain = next(e).then(
+      value => ({ kind: 'value', value }),
+      error => ({ kind: 'error', error }),
+    )
+
+    // The grace: a sleep that ends early once the chain settles. A sleep the host refuses
+    // never ends the wait, so the chain alone decides.
+    let outcome
+    if (record) {
+      const timer = new AbortController()
+      const grace = $.clock.sleep(GRACE_MS, { signal: timer.signal }).then(
+        () => ({ kind: 'grace' }),
+        () => new Promise(() => {}),
+      )
+      outcome = await Promise.race([chain, grace])
+      timer.abort()
+      if (outcome.kind === 'grace' && hasStarted(record)) outcome = await chain
+    } else {
+      outcome = await chain
+    }
+
+    if (outcome.kind === 'grace') {
+      noteDiag('press', `${e.element} の next(e) が ${GRACE_MS}ms 返らず、onPress も始まっていない`)
+      chain.then(late => noteDiag('press', `${e.element} の next(e) が後から ${describeOutcome(late)}`))
+    } else {
+      const reached = record ? (hasStarted(record) ? '、onPress まで届いた' : '、onPress は呼ばれていない') : ''
+      noteDiag('press', `${e.element} の next(e) → ${describeOutcome(outcome)}${reached}`)
+    }
+
+    if (!record || hasStarted(record)) {
+      if (record) endPress(e, record)
+      if (outcome.kind === 'error') throw outcome.error
+      return outcome.value
+    }
+    const why = outcome.kind === 'grace' ? 'onPress が始まらない' : 'onPress まで届かなかった'
+    try {
+      await takeOver(record, e, why)
+    } catch (error) {
+      noteDiag('[press/再実行]', `${e.element} の再実行で例外: ${errorText(error)}`)
+    }
+    return { element: e.element }
+  })
+
+  // ===== [診断/press] ui.focus { component: 'Pane' } =====
+  // Watches every move of a pane's focus ring (a click, Tab, autoFocus, $.ui.focus) and lets
+  // it through unchanged, noting whether it landed
+  on('ui.focus', { component: 'Pane' }, async ($, e, next) => {
+    const origin = e.origin.kind === 'plugin' ? `plugin ${e.origin.name}` : e.origin.kind
+    const target = e.element ?? '（エンジンの停止位置）'
+    const result = await next(e)
+    const outcome = result?.deny ? `deny: ${result.deny}` : '移った'
+    noteDiag('focus', `${e.requestId} → ${target}（origin: ${origin}）${outcome}`)
+    return result
   })
 }

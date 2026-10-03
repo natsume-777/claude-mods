@@ -6,6 +6,8 @@
 
 import { SITES, toggleValue, noteCall } from './sites.js'
 import { SPACE, COLOR, BUTTON, dim, field, header, section, page } from './style.js'
+import { noteDiag, notePaneRender } from './diag.js'
+import { guardDrawing } from './press-guard.js'
 import { atom, read, update } from 'claude-code'
 
 // The state this file reads and writes (declared in types/index.d.ts): the pane's view, one
@@ -23,7 +25,9 @@ const keyOf = (prefix, id) => prefix + '-' + id.replace(/[^A-Za-z0-9_-]/g, '_')
 
 // Counts the call, and redraws once (the category views' counts) when a site or surface is new
 function noteRender($, id, e) {
-  if (noteCall(id, e.surface)) $.ui.invalidate('ui.render')
+  if (!noteCall(id, e.surface)) return
+  noteDiag('invalidate', `${id} の初回描画（新しい surface）`)
+  $.ui.invalidate('ui.render')
 }
 
 // Switches the pane's view from a press handler (never while drawing), and brings the new
@@ -377,8 +381,11 @@ export function registerElements(on) {
   // passes every other view on with next(e)
   on('ui.render', { component: 'Pane', requestId: 'ui-sampler' }, async ($, e, next) => {
     if ((await read($, view)) !== 'samples') return next(e)
+    notePaneRender(e)
     noteRender($, 'Pane', e)
-    const table = $.ui.resolve(e)
+    // The guard keeps this drawing's Button closures for [press/再実行] (press-guard.js)
+    const guard = guardDrawing(e.requestId)
+    const table = guard.wrap($.ui.resolve(e))
     const { Box, Text, Button } = table
 
     // Each sample as a section: its label, what it shows, then its parts a blank row apart; a
@@ -410,7 +417,7 @@ export function registerElements(on) {
       )
     }
 
-    return page(table, [
+    return guard.done(page(table, [
       header(table, {
         title: '[Pane/samples] 部品の見本',
         about: 'パネルに置ける部品を 1 種類ずつ描いた見本。オン・オフは「部品」の一覧で切り替える',
@@ -424,6 +431,6 @@ export function registerElements(on) {
         field(table, 'where-surface', 'e.surface', e.surface),
         field(table, 'where-table', '$.ui.resolve(e) の表', Object.keys(table).join(', ')),
       ]),
-    ])
+    ]))
   })
 }

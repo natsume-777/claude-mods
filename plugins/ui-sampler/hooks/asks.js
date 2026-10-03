@@ -4,6 +4,7 @@
 // a line under it, which [$.ui.notice] does from a tool.call hook on Bash.
 
 import { noteCall, noteProps, noteResult, toggleValue } from './sites.js'
+import { noteDiag } from './diag.js'
 import { read } from 'claude-code'
 
 // The state this file reads (declared in types/index.d.ts): one switch per site id
@@ -14,7 +15,9 @@ const TOGGLES = { plugin: 'ui-sampler', key: 'toggles' }
 function noteRender($, id, e) {
   const isNewCall = noteCall(id, e.surface)
   const isNewProps = noteProps(id, e)
-  if (isNewCall || isNewProps) $.ui.invalidate('ui.render')
+  if (!isNewCall && !isNewProps) return
+  noteDiag('invalidate', `${id} の${isNewCall ? '初回描画' : ' props が変わった'}`)
+  $.ui.invalidate('ui.render')
 }
 
 // Reading the switch while drawing subscribes the dialog, so a press in the pane redraws it
