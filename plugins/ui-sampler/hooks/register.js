@@ -13,6 +13,8 @@
 // transcript.js    [UserMessage] [AssistantMessage] [ToolUse] [ToolResult] [ToolGroup]: the
 //                  transcript's rows; [ToolProgress] [TurnDuration] [InfoNotice]: counted only
 // asks.js          [AskUserQuestion] [$.ui.notice]: the question dialog, the permission dialog
+// style.js         the shared look: spacing, column widths, colors, button roles, and pure
+//                  builders for headers, sections, table rows, fields and cards
 
 import { COMMAND, DIALOG_COMMAND, DIALOG_OPEN, PANE, noteCall } from './sites.js'
 import { registerPane } from './pane.js'

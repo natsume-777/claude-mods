@@ -4,6 +4,7 @@
 // passes `next(e)` on unchanged when its site is switched off in the pane.
 
 import { DIALOG_OPEN, noteCall, noteProps, formatValue, toggleValue } from './sites.js'
+import { SPACE, BUTTON, dim, inline } from './style.js'
 import { atom, read, update } from 'claude-code'
 
 // The state this file reads (declared in types/index.d.ts): one switch per site id, which
@@ -115,47 +116,59 @@ export function registerEngineLines(on) {
     noteRender($, 'AbovePrompt', e)
     const inner = await next(e)
     if (e.props.hasSurvey || !(await isOn($, 'AbovePrompt'))) return inner
-    const { Box, Text, Button, Input } = $.ui.resolve(e)
+    const ui = $.ui.resolve(e)
+    const { Box, Text, Button, Input } = ui
+    // One row: the label, the two buttons, the input, then the echoes cut to what is left of
+    // the width; it wraps only when the band is too narrow for the controls
     const ours = Box({
-      flexDirection: 'column',
+      paddingX: SPACE.page,
+      flexDirection: 'row',
+      columnGap: SPACE.column,
+      rowGap: SPACE.control,
+      alignItems: 'center',
+      flexWrap: 'wrap',
+      width: '100%',
       children: [
+        Text({ bold: true, children: ['[AbovePrompt]'] }),
+        inline(ui, 'band-buttons', [
+          Button({
+            key: 'band-press',
+            label: '帯のボタン',
+            ...BUTTON.nav,
+            onPress: press => echoTo($, 'AbovePrompt:press', `押された（e.surface: ${press.surface}）`),
+          }),
+          Button({
+            key: 'band-dialog',
+            label: '[DialogPane] を開く',
+            ...BUTTON.nav,
+            onPress: press => openDialogFromBand($, press),
+          }),
+        ]),
+        Input({
+          key: 'band-input',
+          label: '帯の入力',
+          placeholder: 'ここに入力して Enter',
+          submitLabel: '写す',
+          onSubmit: value => echoTo($, 'AbovePrompt:submit', value),
+        }),
         Box({
-          flexDirection: 'row',
-          columnGap: 1,
-          alignItems: 'center',
-          flexWrap: 'wrap',
+          flexGrow: 1,
+          flexShrink: 1,
           children: [
-            Text({ bold: true, children: ['[AbovePrompt]'] }),
-            Button({
-              key: 'band-press',
-              label: '帯のボタン',
-              onPress: press => echoTo($, 'AbovePrompt:press', `押された（e.surface: ${press.surface}）`),
-            }),
-            Button({
-              key: 'band-dialog',
-              label: '[DialogPane] を開く',
-              onPress: press => openDialogFromBand($, press),
-            }),
-            Input({
-              key: 'band-input',
-              label: '帯の入力',
-              placeholder: 'ここに入力して Enter',
-              submitLabel: '写す',
-              onSubmit: value => echoTo($, 'AbovePrompt:submit', value),
+            Text({
+              dimColor: true,
+              wrap: 'truncate-end',
+              children: [`ボタン: ${await echoOf($, 'AbovePrompt:press')} / 入力: ${await echoOf($, 'AbovePrompt:submit')}`],
             }),
           ],
         }),
-        Text({
-          dimColor: true,
-          wrap: 'wrap',
-          children: [
-            `ボタン: ${await echoOf($, 'AbovePrompt:press')} / 入力: ${await echoOf($, 'AbovePrompt:submit')}`,
-          ],
-        }),
-        inner ? Text({ dimColor: true, wrap: 'wrap', children: ['[AbovePrompt] この下はほかの mod の帯（next(e) が返したもの）'] }) : null,
       ],
     })
-    return inner ? Box({ flexDirection: 'column', children: [ours, inner] }) : ours
+    if (!inner) return ours
+    return Box({
+      flexDirection: 'column',
+      children: [ours, dim(ui, 'band-others', '[AbovePrompt] この下はほかの mod の帯（next(e) が返したもの）'), inner],
+    })
   })
 
   // ===== [CommandOutput] ui.render { component: 'CommandOutput', props: { command: 'ui-sampler' } } =====

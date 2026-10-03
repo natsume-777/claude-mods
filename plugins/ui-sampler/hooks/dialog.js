@@ -5,6 +5,7 @@
 // should hold the keys, a toast button for holdToasts, and a close button.
 
 import { DIALOG_PANE, noteCall } from './sites.js'
+import { BUTTON, dim, inline, field, header, section, page } from './style.js'
 import { read, update } from 'claude-code'
 
 // The state this file reads and writes (declared in types/index.d.ts): its echo lines
@@ -30,41 +31,37 @@ export function registerDialog(on) {
   // The matcher is DIALOG_PANE's value as a literal, so `plugin validate` can list it
   on('ui.render', { component: 'Pane', requestId: 'ui-sampler-dialog' }, async ($, e) => {
     noteRender($, 'DialogPane', e)
-    const { Box, Text, Button, Input } = $.ui.resolve(e)
-    const dim = text => Text({ dimColor: true, wrap: 'wrap', children: [text] })
+    const ui = $.ui.resolve(e)
+    const { Button, Input } = ui
     const viewport = e.viewport
       ? `${e.viewport.columns} 桁 × ${e.viewport.rows} 行（isFullscreen: ${e.viewport.isFullscreen ?? '不明'}）`
       : 'なし（まだ測られていない）'
 
-    return Box({
-      flexDirection: 'column',
-      rowGap: 1,
-      width: '100%',
-      children: [
-        Text({ bold: true, children: ['[DialogPane] ダイアログ風のパネル'] }),
-        // Which entry opened it, and where the surface seated it
-        Box({
-          flexDirection: 'column',
-          width: '100%',
-          children: [
-            Text({ wrap: 'wrap', children: ['開いたところ: ' + (await echoOf($, 'DialogPane:openedBy'))] }),
-            dim('$.ui.open の結果: ' + (await echoOf($, 'DialogPane:openResult'))),
-            Text({ wrap: 'wrap', children: [`e.props.placement: ${e.props.placement}`] }),
-            dim(`e.props: title = ${e.props.title}、isFocused = ${e.props.isFocused}、bodyColumns = ${e.props.bodyColumns}`),
-            dim(`e.surface: ${e.surface}、e.viewport: ${viewport}`),
-            dim('placement は dock（本体の横）か inline（プロンプト欄の上）のどちらか。型定義には、ダイアログとして重ねて出すよう頼むオプションはない'),
-          ],
-        }),
-        Box({
-          flexDirection: 'column',
-          width: '100%',
-          children: [
-            dim('focus: true … 開いたときにキー入力をこのパネルへ移すよう頼む（プロンプト欄が空のときだけ）'),
-            dim('closeOnEscape: true … キー入力を持っている間に Esc を押すと閉じる'),
-            dim('holdToasts: true … このパネルが出ている間はトーストを止めておき、閉じてから出す'),
-            dim('rows: 12 … プロンプト欄の上に出るとき、本文に 12 行ほしいと頼む（横に出るときは使われない）'),
-          ],
-        }),
+    return page(ui, [
+      header(ui, {
+        title: '[DialogPane] ダイアログ風のパネル',
+        about: '$.ui.open のダイアログ向けのオプションを付けて開いたパネル。どこから開き、どこに置かれたかを示す',
+        nav: [Button({ key: 'dialog-close', label: '閉じる', ...BUTTON.nav, onPress: () => $.ui.close({ id: DIALOG_PANE }) })],
+      }),
+      // Which entry opened it, and where the surface seated it
+      section(ui, 'opened', '開いたところ', [
+        field(ui, 'opened-by', '開いた入口', await echoOf($, 'DialogPane:openedBy')),
+        field(ui, 'opened-result', '$.ui.open の結果', await echoOf($, 'DialogPane:openResult')),
+        field(ui, 'opened-placement', 'e.props.placement', e.props.placement),
+        field(ui, 'opened-title', 'e.props.title', String(e.props.title)),
+        field(ui, 'opened-focused', 'e.props.isFocused', String(e.props.isFocused)),
+        field(ui, 'opened-columns', 'e.props.bodyColumns', String(e.props.bodyColumns)),
+        field(ui, 'opened-surface', 'e.surface', e.surface),
+        field(ui, 'opened-viewport', 'e.viewport', viewport),
+        dim(ui, 'opened-note', 'placement は dock（本体の横）か inline（プロンプト欄の上）のどちらか。型定義には、ダイアログとして重ねて出すよう頼むオプションはない'),
+      ]),
+      section(ui, 'options', '頼んだオプション', [
+        field(ui, 'option-focus', 'focus: true', '開いたときにキー入力をこのパネルへ移すよう頼む（プロンプト欄が空のときだけ）'),
+        field(ui, 'option-escape', 'closeOnEscape: true', 'キー入力を持っている間に Esc を押すと閉じる'),
+        field(ui, 'option-toasts', 'holdToasts: true', 'このパネルが出ている間はトーストを止めておき、閉じてから出す'),
+        field(ui, 'option-rows', 'rows: 12', 'プロンプト欄の上に出るとき、本文に 12 行ほしいと頼む（横に出るときは使われない）'),
+      ]),
+      section(ui, 'try', '試す', [
         Input({
           key: 'dialog-input',
           label: '[DialogPane] 入力',
@@ -72,13 +69,11 @@ export function registerDialog(on) {
           submitLabel: '写す',
           onSubmit: value => echoTo($, 'DialogPane:submit', value),
         }),
-        dim('Enter で確定（onSubmit）: ' + (await echoOf($, 'DialogPane:submit'))),
-        Box({
-          flexDirection: 'row',
-          columnGap: 1,
-          alignItems: 'center',
-          flexWrap: 'wrap',
-          children: [
+        field(ui, 'try-submit', 'Enter で確定', await echoOf($, 'DialogPane:submit')),
+        inline(
+          ui,
+          'try-buttons',
+          [
             Button({
               key: 'dialog-toast',
               label: 'トーストを出す（holdToasts）',
@@ -87,11 +82,11 @@ export function registerDialog(on) {
                 return echoTo($, 'DialogPane:toast', 'トーストを出した。閉じる前に見えたかどうかを確かめる')
               },
             }),
-            Button({ key: 'dialog-close', label: '閉じる', onPress: () => $.ui.close({ id: DIALOG_PANE }) }),
           ],
-        }),
-        dim(await echoOf($, 'DialogPane:toast')),
-      ],
-    })
+          1,
+        ),
+        field(ui, 'try-toast', 'トースト', await echoOf($, 'DialogPane:toast')),
+      ]),
+    ])
   })
 }

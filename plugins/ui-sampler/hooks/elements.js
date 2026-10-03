@@ -5,6 +5,7 @@
 // switch samples off until this view shows; the last one switched off is the one refused.
 
 import { SITES, toggleValue, noteCall } from './sites.js'
+import { SPACE, COLOR, BUTTON, dim, field, header, section, page } from './style.js'
 import { atom, read, update } from 'claude-code'
 
 // The state this file reads and writes (declared in types/index.d.ts): the pane's view, one
@@ -113,7 +114,10 @@ const diffSource = [
 async function drawSample($, table, id) {
   const { Box, Text } = table
   const note = text => Text({ dimColor: true, wrap: 'wrap', children: [text] })
-  const row = children => Box({ flexDirection: 'row', columnGap: 1, alignItems: 'center', flexWrap: 'wrap', children })
+  const row = children =>
+    Box({ flexDirection: 'row', columnGap: SPACE.inline, rowGap: SPACE.control, alignItems: 'center', flexWrap: 'wrap', children })
+  // Lines that belong together (a caption and its code), kept without the gap between parts
+  const group = children => Box({ flexDirection: 'column', width: '100%', children })
 
   switch (id) {
     // ===== [Pane/Text] Text { color, backgroundColor, bold, dimColor, italic, underline, strikethrough, inverse, wrap, hover } =====
@@ -254,16 +258,18 @@ async function drawSample($, table, id) {
     // ===== [Pane/Input] Input { label, placeholder, submitLabel, value, onInput, onSubmit } =====
     case 'Pane/Input': {
       return [
-        table.Input({
-          key: 'input-echo',
-          label: '[Pane/Input]',
-          placeholder: 'ここに入力（placeholder）',
-          submitLabel: '写す',
-          onInput: value => echoTo($, 'Pane/Input:change', value),
-          onSubmit: value => echoTo($, 'Pane/Input:submit', value),
-        }),
-        note('入力中（onInput）: ' + (await echoOf($, 'Pane/Input:change'))),
-        note('Enter で確定（onSubmit）: ' + (await echoOf($, 'Pane/Input:submit'))),
+        group([
+          table.Input({
+            key: 'input-echo',
+            label: '[Pane/Input]',
+            placeholder: 'ここに入力（placeholder）',
+            submitLabel: '写す',
+            onInput: value => echoTo($, 'Pane/Input:change', value),
+            onSubmit: value => echoTo($, 'Pane/Input:submit', value),
+          }),
+          note('入力中（onInput）: ' + (await echoOf($, 'Pane/Input:change'))),
+          note('Enter で確定（onSubmit）: ' + (await echoOf($, 'Pane/Input:submit'))),
+        ]),
         table.Input({
           key: 'input-value',
           label: 'value あり',
@@ -295,28 +301,35 @@ async function drawSample($, table, id) {
     // ===== [Pane/Link] Link { href, label, children } =====
     case 'Pane/Link': {
       return [
-        Text({ children: ['文中の ', table.Link({ href: LINK_HREF, children: ['children のリンク'] }), ' です'] }),
-        Text({ children: [table.Link({ href: LINK_HREF, label: 'label のリンク' })] }),
-        Text({ children: ['どちらもなし: ', table.Link({ href: LINK_HREF })] }),
-        Text({ children: ['localhost: ', table.Link({ href: 'http://localhost:3000/', label: 'http://localhost:3000/' })] }),
+        group([
+          Text({ children: ['文中の ', table.Link({ href: LINK_HREF, children: ['children のリンク'] }), ' です'] }),
+          Text({ children: [table.Link({ href: LINK_HREF, label: 'label のリンク' })] }),
+          Text({ children: ['どちらもなし: ', table.Link({ href: LINK_HREF })] }),
+          Text({ children: ['localhost: ', table.Link({ href: 'http://localhost:3000/', label: 'http://localhost:3000/' })] }),
+        ]),
       ]
     }
 
     // ===== [Pane/Code] Code { source, language, path, startLine, format, wrap } =====
     case 'Pane/Code': {
       return [
-        note('language: js + startLine: 10'),
-        table.Code({ source: "function greet(name) {\n  return 'こんにちは、' + name\n}", language: 'js', startLine: 10 }),
-        note('path: example.py（language なし、拡張子から推測）'),
-        table.Code({ source: 'def greet(name):\n    return f"こんにちは、{name}"', path: 'example.py' }),
-        note("format: 'diff'"),
-        table.Code({ source: diffSource, format: 'diff' }),
-        note("wrap: 'truncate-end'"),
-        table.Code({
-          source: "const message = 'この行は長いので、パネルの幅に収まらなければ末尾が省略されるはずです。' + '続き'.repeat(20)",
-          language: 'js',
-          wrap: 'truncate-end',
-        }),
+        group([
+          note('language: js + startLine: 10'),
+          table.Code({ source: "function greet(name) {\n  return 'こんにちは、' + name\n}", language: 'js', startLine: 10 }),
+        ]),
+        group([
+          note('path: example.py（language なし、拡張子から推測）'),
+          table.Code({ source: 'def greet(name):\n    return f"こんにちは、{name}"', path: 'example.py' }),
+        ]),
+        group([note("format: 'diff'"), table.Code({ source: diffSource, format: 'diff' })]),
+        group([
+          note("wrap: 'truncate-end'"),
+          table.Code({
+            source: "const message = 'この行は長いので、パネルの幅に収まらなければ末尾が省略されるはずです。' + '続き'.repeat(20)",
+            language: 'js',
+            wrap: 'truncate-end',
+          }),
+        ]),
       ]
     }
 
@@ -367,64 +380,50 @@ export function registerElements(on) {
     noteRender($, 'Pane', e)
     const table = $.ui.resolve(e)
     const { Box, Text, Button } = table
-    const dim = (key, text) => Text({ key, dimColor: true, wrap: 'wrap', children: [text] })
 
-    // Each sample under its label; a sample switched off says so. The switches are in the
-    // elements category's view, which draws whatever this view does
+    // Each sample as a section: its label, what it shows, then its parts a blank row apart; a
+    // sample switched off says so. The switches are in the elements category's view, which
+    // draws whatever this view does
     const sections = []
     for (const site of SITES) {
       if (site.kind !== 'element') continue
       let body
       if (!(await isOn($, site.id))) {
-        body = [dim(keyOf('off', site.id), 'オフにしてあるので描いていない（「部品」の一覧で切り替える）')]
+        body = [dim(table, keyOf('off', site.id), 'オフにしてあるので描いていない（「部品」の一覧で切り替える）')]
       } else if (typeof table[site.element] !== 'function') {
-        body = [Text({ color: 'warning', children: [`${site.label} この surface にはない（表に ${site.element} がない）`] })]
+        body = [Text({ color: COLOR.warn, children: [`${site.label} この surface にはない（表に ${site.element} がない）`] })]
       } else {
         const sample = await drawSample($, table, site.id)
         if (sample.some(node => containsType(node, site.element))) {
           noteCall(site.id, e.surface)
           body = sample
         } else {
-          body = [Text({ color: 'warning', children: [`${site.label} この surface にはない（表の ${site.element} が別の要素を返した）`] })]
+          body = [Text({ color: COLOR.warn, children: [`${site.label} この surface にはない（表の ${site.element} が別の要素を返した）`] })]
         }
       }
 
       sections.push(
-        Box({
-          key: keyOf('sample', site.id),
-          flexDirection: 'column',
-          width: '100%',
-          children: [Text({ bold: true, children: [site.label] }), dim(keyOf('where', site.id), site.where), ...body],
-        }),
+        section(table, keyOf('sample', site.id), site.label, [
+          dim(table, keyOf('where', site.id), site.where),
+          Box({ flexDirection: 'column', rowGap: SPACE.item, marginTop: 1, width: '100%', children: body }),
+        ]),
       )
     }
 
-    return Box({
-      flexDirection: 'column',
-      rowGap: 1,
-      width: '100%',
-      children: [
-        Text({ bold: true, children: ['[Pane/samples] 部品の見本'] }),
-        Box({
-          flexDirection: 'row',
-          columnGap: 1,
-          alignItems: 'center',
-          flexWrap: 'wrap',
-          children: [
-            Button({ key: 'contents', label: '目次へ', onPress: () => go($, 'toc') }),
-            Button({ key: 'switches', label: '部品の一覧へ（オン・オフ）', onPress: () => go($, 'elements') }),
-          ],
-        }),
-        Box({
-          flexDirection: 'column',
-          width: '100%',
-          children: [
-            dim('surface', 'e.surface: ' + e.surface),
-            dim('table', '$.ui.resolve(e) の表: ' + Object.keys(table).join(', ')),
-          ],
-        }),
-        ...sections,
-      ],
-    })
+    return page(table, [
+      header(table, {
+        title: '[Pane/samples] 部品の見本',
+        about: 'パネルに置ける部品を 1 種類ずつ描いた見本。オン・オフは「部品」の一覧で切り替える',
+        nav: [
+          Button({ key: 'contents', label: '目次へ', ...BUTTON.nav, onPress: () => go($, 'toc') }),
+          Button({ key: 'switches', label: '部品の一覧へ（オン・オフ）', ...BUTTON.nav, onPress: () => go($, 'elements') }),
+        ],
+      }),
+      ...sections,
+      section(table, 'where', 'この描画の場所', [
+        field(table, 'where-surface', 'e.surface', e.surface),
+        field(table, 'where-table', '$.ui.resolve(e) の表', Object.keys(table).join(', ')),
+      ]),
+    ])
   })
 }

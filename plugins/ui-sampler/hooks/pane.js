@@ -1,14 +1,14 @@
 // The pane /ui-sampler opens. One pane whose view ($.state `view`, session only) switches what
 // it draws, since a second pane opened from a button may not come to the front:
 //   'toc'          the table of contents: where it is drawn, one row per CATEGORIES entry
-//   a category id  that category's sites, one line apiece (label, on/off switch, call count,
-//                  the API's button, [詳細]), an API's last result under its line, and below
-//                  the list one detail block for the site picked with [詳細]: where it shows,
+//   a category id  that category's sites as a table, one row apiece (label, on/off switch,
+//                  call count, [詳細], the API's button), an API's last result under its row, and
+//                  below the list one detail card for the site picked with [詳細]: where it shows,
 //                  the choice of what [PromptHint], [Spinner] and [CommandOutput] write, the
 //                  call count by surface, the props a render site last received, the last result
 //   'samples'      the element samples, drawn by elements.js's hook, which wraps this one
 // /ui-sampler sets the view back to 'toc' (register.js), the way back from a view that does
-// not draw.
+// not draw. Spacing, columns, colors and button roles come from style.js.
 
 import {
   DIALOG_OPEN,
@@ -24,6 +24,24 @@ import {
   noteResult,
   resultOf,
 } from './sites.js'
+import {
+  SPACE,
+  WIDTH,
+  BUTTON,
+  choice,
+  dim,
+  inline,
+  cell,
+  fill,
+  tableRow,
+  field,
+  header,
+  section,
+  card,
+  page,
+  stateMark,
+  table,
+} from './style.js'
 import { atom, read, update } from 'claude-code'
 
 // The state this file reads and writes (declared in types/index.d.ts): the pane's view, one
@@ -250,196 +268,268 @@ function setMode($, id, value) {
   }
 }
 
-/** The detail lines for the props a render site last received, each against its note. */
-function propsLines(site) {
+/**
+ * The props a render site last received, each against its note: `meta` says when and where
+ * they came, `entries` one `{ name, value, note }` per prop, `note` the site's line under them.
+ */
+function propsEntries(site) {
   const seen = lastProps(site.id)
-  if (!seen) return ['受け取った props: まだ呼ばれていない']
+  if (!seen) return { meta: 'まだ呼ばれていない', entries: [], note: undefined }
   const names = [...new Set([...Object.keys(site.props), ...Object.keys(seen.props)])]
-  const lines = [`受け取った props（最後の 1 回、e.surface: ${seen.surface}）:`]
-  for (const name of names) {
-    const note = site.props[name] ?? '型定義に説明のない項目'
-    lines.push(`・${name} = ${formatValue(seen.props[name])} … ${note}`)
+  return {
+    meta: `最後の 1 回、e.surface: ${seen.surface}`,
+    entries: names.map(name => ({
+      name,
+      value: formatValue(seen.props[name]),
+      note: site.props[name] ?? '型定義に説明のない項目',
+    })),
+    note: site.propsNote,
   }
-  if (site.propsNote) lines.push(site.propsNote)
-  return lines
 }
 
 // ===== [Pane] view 'toc': the table of contents =====
 async function drawContents($, e) {
-  const { Box, Text, Button } = $.ui.resolve(e)
-  const dim = (key, text) => Text({ key, dimColor: true, wrap: 'wrap', children: [text] })
-  const row = (key, children) =>
-    Box({ key, flexDirection: 'row', columnGap: 1, alignItems: 'center', flexWrap: 'wrap', children })
+  const ui = $.ui.resolve(e)
+  const { Text, Button } = ui
 
-  // Where this drawing is, in two lines
+  // Where this drawing is
   const surfaces = await $.session.surfaces()
   const viewport = e.viewport
     ? `${e.viewport.columns} 桁 × ${e.viewport.rows} 行（isFullscreen: ${e.viewport.isFullscreen ?? '不明'}）`
     : 'なし（まだ測られていない）'
 
-  // One row per category: name, count, [開く], then the description (which wraps)
+  // One row per category: name, count, [開く], then the description, which wraps in its column
   const rows = CATEGORIES.map(category => {
     const count = SITES.filter(site => site.category === category.id).length
-    return row('category-' + category.id, [
-      Text({ bold: true, children: [category.label] }),
-      Text({ dimColor: true, children: [category.isPending ? '未実装' : `${count} 件`] }),
-      category.isPending ? null : Button({ key: 'open-' + category.id, label: '開く', onPress: () => go($, category.id) }),
-      Text({ dimColor: true, wrap: 'wrap', children: [category.about] }),
-    ])
+    return tableRow(
+      ui,
+      'category-' + category.id,
+      [
+        cell(ui, WIDTH.category, [Text({ bold: true, children: [category.label] })]),
+        cell(ui, WIDTH.count, [Text({ dimColor: true, children: [category.isPending ? '' : `${count} 件`] })]),
+        cell(ui, WIDTH.detail, [
+          category.isPending
+            ? Text({ dimColor: true, children: ['未実装'] })
+            : Button({ key: 'open-' + category.id, label: '開く', ...BUTTON.nav, onPress: () => go($, category.id) }),
+        ]),
+        fill(ui, [Text({ dimColor: true, wrap: 'wrap', children: [category.about] })], 'column'),
+      ],
+      'flex-start',
+    )
   })
 
-  return Box({
-    flexDirection: 'column',
-    rowGap: 1,
-    width: '100%',
-    children: [
-      Text({ bold: true, children: ['[Pane] UI 見本市の目次'] }),
-      Box({
-        key: 'header',
-        flexDirection: 'column',
-        width: '100%',
-        children: [
-          dim('where-surface', `e.surface: ${e.surface} ／ $.session.surfaces(): ${surfaces.length > 0 ? surfaces.join(', ') : 'なし'}`),
-          dim('where-size', `e.viewport: ${viewport} ／ placement: ${e.props.placement}（本体 ${e.props.bodyColumns} 桁）`),
-        ],
-      }),
-      Box({ key: 'categories', flexDirection: 'column', rowGap: 1, width: '100%', children: rows }),
-      Button({ key: 'close', label: '閉じる', role: 'dismiss', onPress: () => $.ui.close({ id: 'ui-sampler' }) }),
-    ],
-  })
+  return page(ui, [
+    header(ui, {
+      title: '[Pane] UI 見本市の目次',
+      about: '分類を開くと、その分類で描ける場所と呼べる API が 1 行ずつ並ぶ',
+      nav: [
+        Button({ key: 'close', label: '閉じる', role: 'dismiss', ...BUTTON.nav, onPress: () => $.ui.close({ id: 'ui-sampler' }) }),
+      ],
+    }),
+    section(ui, 'categories', '分類', rows, SPACE.item),
+    section(ui, 'where', 'この描画の場所', [
+      field(ui, 'where-surface', 'e.surface', e.surface),
+      field(ui, 'where-surfaces', '$.session.surfaces()', surfaces.length > 0 ? surfaces.join(', ') : 'なし'),
+      field(ui, 'where-viewport', 'e.viewport', viewport),
+      field(ui, 'where-placement', 'placement', `${e.props.placement}（本体 ${e.props.bodyColumns} 桁）`),
+    ]),
+  ])
 }
 
 // ===== [Pane] view <category id>: one category's sites and the [詳細] of one =====
 async function drawCategory($, e, category) {
   const sites = SITES.filter(site => site.category === category.id)
-  const { Box, Text, Button } = $.ui.resolve(e)
+  const ui = $.ui.resolve(e)
+  const { Box, Text, Button } = ui
   const redraw = () => $.ui.invalidate('ui.render')
-  // Explanations wrap at the pane's edge rather than run past it
-  const dim = (key, text) => Text({ key, dimColor: true, wrap: 'wrap', children: [text] })
-  const row = (key, children) =>
-    Box({ key, flexDirection: 'row', columnGap: 1, alignItems: 'center', flexWrap: 'wrap', children })
+  const dash = () => Text({ dimColor: true, children: ['—'] })
 
-  // ----- The list: one line per site, and an API's last result under its line -----
+  // ----- The list: one row per site, columns label · state · count · [詳細] · action -----
+  // The action column is there only when some site of the list has a button to run. Each
+  // site's row and its last result are one table entry, so the gap falls between sites.
   // Reading each switch and the pick here subscribes the pane, so a press redraws it
   const picked = await selectedOf($, category.id)
-  const lines = []
+  const hasActions = sites.some(site => ACTION_BUTTONS[site.id])
+  const headCells = [
+    cell(ui, WIDTH.label, [Text({ dimColor: true, children: ['項目'] })]),
+    cell(ui, WIDTH.state, [Text({ dimColor: true, children: ['状態'] })]),
+    cell(ui, WIDTH.count, [Text({ dimColor: true, children: ['回数'] })]),
+    cell(ui, WIDTH.detail, []),
+  ]
+  if (hasActions) headCells.push(fill(ui, [Text({ dimColor: true, children: ['操作'] })]))
+  const entries = [tableRow(ui, 'list-head', headCells)]
   for (const site of sites) {
-    const controls = [Text({ bold: true, children: [site.label] })]
+    let state = dash()
     if (site.toggleable) {
       const isSiteOn = await isOn($, site.id)
-      controls.push(
+      state = inline(
+        ui,
+        keyOf('state', site.id),
+        [
+          stateMark(ui, isSiteOn),
+          Button({
+            key: keyOf('toggle', site.id),
+            label: isSiteOn ? 'オン' : 'オフ',
+            ...(isSiteOn ? BUTTON.nav : BUTTON.minor),
+            onPress: () => toggle($, site.id),
+          }),
+        ],
+        0,
+        SPACE.mark,
+      )
+    }
+    const cells = [
+      cell(ui, WIDTH.label, [Text({ children: [site.label] })]),
+      cell(ui, WIDTH.state, [state]),
+      cell(ui, WIDTH.count, [Text({ dimColor: true, children: [callCount(site.id)] })]),
+      cell(ui, WIDTH.detail, [
         Button({
-          key: keyOf('toggle', site.id),
-          label: isSiteOn ? 'オン' : 'オフ',
-          variant: isSiteOn ? 'primary' : 'secondary',
-          onPress: () => toggle($, site.id),
+          key: keyOf('detail', site.id),
+          label: '詳細',
+          ...choice(picked === site.id),
+          onPress: () => select($, category.id, site.id),
         }),
-      )
-    }
-    controls.push(Text({ dimColor: true, children: [callCount(site.id)] }))
-    const actionLabel = ACTION_BUTTONS[site.id]
-    if (actionLabel) {
-      controls.push(
-        Button({
-          key: keyOf('run', site.id),
-          label: actionLabel,
-          onPress: async press => {
-            // A render site's count is its drawings, not the presses that open it
-            if (site.kind === 'api') noteCall(site.id, press.surface)
-            noteResult(site.id, await runAction($, site.id, press))
-            redraw()
-          },
-        }),
-      )
-    }
-    controls.push(
-      Button({
-        key: keyOf('detail', site.id),
-        label: '詳細',
-        variant: picked === site.id ? 'primary' : 'secondary',
-        onPress: () => select($, category.id, site.id),
-      }),
-    )
-    lines.push(row(keyOf('line', site.id), controls))
-    const result = resultOf(site.id)
-    if (result !== undefined) {
-      lines.push(
-        Text({ key: keyOf('result', site.id), dimColor: true, wrap: 'truncate-end', children: ['　結果: ' + result] }),
-      )
-    }
-  }
-
-  // ----- [詳細] The picked site's detail block -----
-  const detail = []
-  const site = sites.find(one => one.id === picked)
-  if (site) {
-    detail.push(
-      row('detail-heading', [
-        Text({ bold: true, children: [`${site.label} の詳細`] }),
-        Text({ dimColor: true, children: [KIND_LABEL[site.kind]] }),
       ]),
-      Text({ key: 'detail-where', wrap: 'wrap', children: ['場所: ' + site.where] }),
-    )
-    const choices = MODE_CHOICES[site.id]
-    if (choices) {
-      const current = await modeOf($, site.id)
-      detail.push(
-        row('detail-modes', [
-          Text({ dimColor: true, children: ['書き方:'] }),
-          ...choices.map(choice =>
-            Button({
-              key: keyOf('mode-' + choice.value, site.id),
-              label: choice.label,
-              variant: choice.value === current ? 'primary' : 'secondary',
-              onPress: () => setMode($, site.id, choice.value),
-            }),
-          ),
+    ]
+    const actionLabel = ACTION_BUTTONS[site.id]
+    if (hasActions) {
+      cells.push(
+        fill(ui, [
+          actionLabel
+            ? Button({
+                key: keyOf('run', site.id),
+                label: actionLabel,
+                onPress: async press => {
+                  // A render site's count is its drawings, not the presses that open it
+                  if (site.kind === 'api') noteCall(site.id, press.surface)
+                  noteResult(site.id, await runAction($, site.id, press))
+                  redraw()
+                },
+              })
+            : null,
         ]),
       )
     }
-    detail.push(dim('detail-calls', '呼び出し: ' + callSummary(site.id)))
-    if (site.props) {
-      propsLines(site).forEach((text, index) => detail.push(dim('detail-props' + index, text)))
-    }
     const result = resultOf(site.id)
-    if (result !== undefined) detail.push(dim('detail-result', '結果: ' + result))
+    entries.push(
+      Box({
+        key: keyOf('entry', site.id),
+        flexDirection: 'column',
+        width: '100%',
+        children: [
+          tableRow(ui, keyOf('line', site.id), cells),
+          result !== undefined
+            ? Box({
+                key: keyOf('result', site.id),
+                paddingLeft: SPACE.indent,
+                children: [Text({ dimColor: true, wrap: 'truncate-end', children: ['結果: ' + result] })],
+              })
+            : null,
+        ],
+      }),
+    )
+  }
+
+  // ----- [詳細] The picked site's detail card -----
+  const site = sites.find(one => one.id === picked)
+  let detail = dim(ui, 'detail-none', '[詳細] を押すと、その項目の場所・受け取った値・結果がここに出る')
+  if (site) {
+    const fields = [field(ui, 'detail-where', '場所', site.where, WIDTH.prop)]
+    const choices = MODE_CHOICES[site.id]
+    if (choices) {
+      const current = await modeOf($, site.id)
+      fields.push(
+        field(
+          ui,
+          'detail-modes',
+          '書き方',
+          choices.map(one =>
+            Button({
+              key: keyOf('mode-' + one.value, site.id),
+              label: one.label,
+              ...choice(one.value === current),
+              onPress: () => setMode($, site.id, one.value),
+            }),
+          ),
+          WIDTH.prop,
+        ),
+      )
+    }
+    fields.push(field(ui, 'detail-calls', '呼び出し', callSummary(site.id), WIDTH.prop))
+    const result = resultOf(site.id)
+    if (result !== undefined) fields.push(field(ui, 'detail-result', '結果', result, WIDTH.prop))
+
+    const blocks = [
+      inline(ui, 'detail-heading', [
+        Text({ bold: true, children: [`${site.label} の詳細`] }),
+        Text({ dimColor: true, children: [KIND_LABEL[site.kind]] }),
+      ]),
+      Box({ key: 'detail-fields', flexDirection: 'column', rowGap: SPACE.row, width: '100%', children: fields }),
+    ]
+    if (site.props) {
+      const props = propsEntries(site)
+      blocks.push(
+        Box({
+          key: 'detail-props',
+          flexDirection: 'column',
+          rowGap: SPACE.row,
+          width: '100%',
+          children: [
+            inline(ui, 'detail-props-heading', [
+              Text({ bold: true, children: ['受け取った props'] }),
+              Text({ dimColor: true, children: [props.meta] }),
+            ]),
+            ...props.entries.map(entry =>
+              tableRow(
+                ui,
+                keyOf('prop', entry.name),
+                [
+                  cell(ui, WIDTH.prop, [Text({ dimColor: true, children: [entry.name] })]),
+                  fill(
+                    ui,
+                    [
+                      Text({ wrap: 'wrap', children: [entry.value] }),
+                      Text({ dimColor: true, wrap: 'wrap', children: [entry.note] }),
+                    ],
+                    'column',
+                  ),
+                ],
+                'flex-start',
+              ),
+            ),
+            props.note ? dim(ui, 'detail-props-note', props.note) : null,
+          ],
+        }),
+      )
+    }
+    detail = card(ui, 'detail', blocks)
   }
 
   // The elements category also leads to the samples view; a sample the surface refuses blanks
   // that view only, and /ui-sampler brings back the contents
   const nav = [
-    Button({ key: 'contents', label: '目次へ', onPress: () => go($, 'toc') }),
-    Button({ key: 'refresh', label: '回数を更新', onPress: redraw }),
+    Button({ key: 'contents', label: '目次へ', ...BUTTON.nav, onPress: () => go($, 'toc') }),
+    Button({ key: 'refresh', label: '回数を更新', ...BUTTON.nav, onPress: redraw }),
   ]
   if (category.id === 'elements') {
-    nav.push(Button({ key: 'samples', label: '見本を見る', variant: 'primary', onPress: () => go($, 'samples') }))
+    nav.push(Button({ key: 'samples', label: '見本を見る', ...BUTTON.main, onPress: () => go($, 'samples') }))
   }
 
-  return Box({
-    flexDirection: 'column',
-    rowGap: 1,
-    width: '100%',
-    children: [
-      Text({ bold: true, children: ['[Pane] ' + category.label] }),
-      dim('about', category.about),
-      row('nav', nav),
-      category.id === 'elements'
-        ? dim('samples-howto', '見本でパネルが真っ白になったら、/ui-sampler で目次に戻り、ここで [Pane/…] を 1 つずつオフにすると、どれが断られているか分かる')
-        : null,
-      Box({ key: 'list', flexDirection: 'column', width: '100%', children: lines }),
-      site
-        ? Box({
-            key: 'detail',
-            flexDirection: 'column',
-            width: '100%',
-            borderStyle: 'round',
-            paddingX: 1,
-            children: detail,
-          })
-        : dim('detail-none', '[詳細] を押すと、その項目の場所・受け取った値・結果がここに出る'),
-    ],
-  })
+  return page(ui, [
+    header(ui, {
+      title: '[Pane] ' + category.label,
+      about: category.about,
+      nav,
+      note:
+        category.id === 'elements'
+          ? '見本でパネルが真っ白になったら、/ui-sampler で目次に戻り、ここで [Pane/…] を 1 つずつオフにすると、どれが断られているか分かる'
+          : undefined,
+    }),
+    section(ui, 'list', '一覧', [table(ui, 'list-table', entries)]),
+    section(ui, 'detail-section', '詳細', [detail]),
+  ])
 }
+
 
 export function registerPane(on) {
   // ===== [Pane] ui.render { component: 'Pane', requestId: 'ui-sampler' } =====
