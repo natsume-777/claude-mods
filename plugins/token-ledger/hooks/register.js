@@ -4,8 +4,9 @@
 //              which ($.agent.list, classic.SubagentStart, the Agent tool's result), a
 //              finished subagent's requests read back from its transcript, the handoff marker
 //              in a new session's first prompt, the timers, /token-ledger's registration
-// pane.js      the pane (one, with views), /token-ledger, the band above the prompt, and
-//              [引き継ぐ…]
+// pane.js      the pane (one, with views), /token-ledger, the band above the prompt,
+//              [引き継ぐ…] and [書き出す]
+// export.js    the two files [書き出す] writes, a .md summary and a .jsonl of the requests (pure)
 // meter.js     the gauge line `トークン ■■■□□ OK`, drawn as usage-band draws its meters (pure)
 // aggregate.js the aggregation and the break-even (pure; also used outside the mod)
 // ledger.js    options, the gauge's stage and advice, formatting, threads, the handoff's draft

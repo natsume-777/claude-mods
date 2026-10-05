@@ -44,6 +44,7 @@ import {
 } from './ledger.js'
 import { SPACE, COLOR, BUTTON, choice, dim, inline, cell, slot, tableRow, field, section, details, page } from './style.js'
 import { fitMeter, meterParts, cells } from './meter.js'
+import { exportPaths, exportMarkdown, exportJsonl, promptLine } from './export.js'
 import { GRACE_MS, guardDrawing, beginPress, hasStarted, takeOver, endPress } from './press-guard.js'
 import { atom, read, update } from 'claude-code'
 
@@ -109,6 +110,38 @@ async function startHandoff($) {
 
 async function cancelHandoff($) {
   await $.state.set(HANDOFF, null)
+}
+
+// Writes the session's numbers to the export folder (export.js: a .md summary and a .jsonl of
+// the requests, the pair overwritten on each press), then names the .md in a toast and in a
+// line added to the prompt box (never sent). Nothing goes into $.state, so nothing redraws.
+async function exportData($) {
+  const now = await $.clock.now()
+  const tz = localOffsetMinutes()
+  const { value: requests = [] } = await $.state.get(REQUESTS)
+  const { value: threads = {} } = await $.state.get(THREADS)
+  const { value: startedAt } = await $.state.get(STARTED_AT)
+  const sessionId = await $.session.id()
+  const paths = exportPaths({
+    dir: getConfig().exportDir,
+    root: await $.session.root(),
+    sessionId,
+    startedAt: typeof startedAt === 'number' ? startedAt : now,
+    tzOffsetMinutes: tz,
+  })
+  const jsonlName = paths.name + '.jsonl'
+  try {
+    await $.fs.write(paths.md, exportMarkdown({ requests, threads, startedAt, now, tzOffsetMinutes: tz, sessionId, jsonlName }))
+    await $.fs.write(paths.jsonl, exportJsonl(requests, threads, tz))
+  } catch (error) {
+    $.ui.toast(`集計を書き出せませんでした（${paths.shown.md}）: ${String(error?.message ?? error)}`)
+    return
+  }
+  const line = promptLine(paths.shown.md)
+  const box = await $.prompt.read()
+  const hasDraft = typeof box?.text === 'string' && box.text.trim() !== ''
+  const filled = await $.prompt.fill(hasDraft ? { text: '\n\n' + line, mode: 'append' } : { text: line, mode: 'replace' })
+  $.ui.toast(`集計を ${paths.shown.md} に書き出しました` + (filled?.isFilled ? '' : '（入力欄には入れられませんでした）'))
 }
 
 // ===== The pane =====
@@ -203,6 +236,7 @@ function drawStatus($, ui, d) {
     actions.push(ui.Button({ key: 'status-handoff', label: '引き継ぐ…', ...BUTTON.main, onPress: () => startHandoff($) }))
   }
   actions.push(ui.Button({ key: 'status-details', label: '詳しい数字', ...BUTTON.nav, onPress: () => go($, 'overview') }))
+  actions.push(ui.Button({ key: 'status-export', label: '書き出す', ...BUTTON.nav, onPress: () => exportData($) }))
   actions.push(ui.Button({ key: 'status-about-handoff', label: '引き継ぎについて', ...BUTTON.nav, onPress: () => go($, 'handoff') }))
   return [section(ui, 'status', '今の状況', lines), inline(ui, 'status-actions', actions)]
 }
@@ -266,6 +300,10 @@ function drawOverview($, ui, d) {
     section(ui, 'totals', '集計開始からの合計', totals),
     section(ui, 'types', 'トークンの種類別', typeRows),
     dim(ui, 'weights-note', WEIGHTS_NOTE),
+    section(ui, 'export', '書き出し', [
+      dim(ui, 'export-about', `この集計を ${getConfig().exportDir} にファイルで書き出し、会話で Claude に読ませられます`),
+      inline(ui, 'overview-actions', [ui.Button({ key: 'overview-export', label: '書き出す', ...BUTTON.nav, onPress: () => exportData($) })]),
+    ]),
   ]
 }
 

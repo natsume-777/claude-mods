@@ -34,7 +34,7 @@ export const VIEWS = [
   { id: 'handoff', label: '引き継ぎ' },
 ]
 
-const DEFAULTS = { ttlMain: '1h', ttlSub: '5m', freshCtx: 70000, baseCtx: 40000, handoffDir: '.claude/handoffs/', showBand: true }
+const DEFAULTS = { ttlMain: '1h', ttlSub: '5m', freshCtx: 70000, baseCtx: 40000, handoffDir: '.claude/handoffs/', exportDir: '.claude/token-ledger/', showBand: true }
 
 // The options register() received, defaults filled in
 let config = { ...DEFAULTS }
@@ -52,6 +52,7 @@ export function setConfig(options = {}) {
     freshCtx: pick('freshCtx', count),
     baseCtx: pick('baseCtx', count),
     handoffDir: pick('handoffDir', (v) => typeof v === 'string' && v.trim() !== ''),
+    exportDir: pick('exportDir', (v) => typeof v === 'string' && v.trim() !== ''),
     showBand: pick('showBand', (v) => typeof v === 'boolean'),
   }
   return config

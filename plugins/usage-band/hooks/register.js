@@ -5,6 +5,8 @@
 // The context figure is this session's own. The rate-limit figures are the account's, but each
 // session reads them only from its own last API response, so the newest reading any session
 // made is shared through $.store, and every session shows the newer of its own and the stored.
+// With the `log` option on, each reading a session publishes to the store is also appended to
+// a daily JSON Lines file under `logDir`, so the readings can be aggregated later.
 
 // This session's context, from $.session.usage() or session.measure; never shared
 let context = null
@@ -15,6 +17,15 @@ let own = null
 let shown = null
 // Refreshes the countdowns; kept so a later session.start or session.end can stop it
 let ticker = null
+// register()'s options, defaults filled in
+let config = null
+// The last reading appended to the log, so a reading stored again (after another session's older
+// write landed last) is not logged twice
+let logged = null
+// Log appends run one after another, so two in one session never read the same old file
+let logQueue = Promise.resolve()
+// Whether this session has shown its one toast about the log
+let logWarned = false
 
 // session.end reasons after which the session is gone; /clear, /resume and logout keep it running
 const FINAL_REASONS = ['prompt_input_exit', 'other']
@@ -25,6 +36,8 @@ const STORE_KEY = 'rateLimits'
 const SAME_WINDOW_MS = 3_600_000
 
 const LABELS = { five_hour: '5h', seven_day: '7d', spend_limit: '$' }
+
+const DEFAULTS = { log: false, logDir: '~/.claude/usage-band/' }
 
 // Usage at or above these percentages turns the meter yellow, then red
 const WARNING_AT = 50
@@ -51,7 +64,8 @@ const STEPS = [
   { bar: null, hasResets: false, hasClock: false },
 ]
 
-export function register(on) {
+export function register(on, options) {
+  config = configOf(options)
   // Fires again on an enable or a worker respawn, which may keep this module's variables
   on('session.start', async ($, e, next) => {
     ticker?.cancel()
@@ -163,8 +177,80 @@ async function sync($) {
     try {
       await $.store.set(STORE_KEY, own)
     } catch {}
+    if (config.log && own !== logged) {
+      const reading = own
+      logged = reading
+      logQueue = logQueue.then(() => appendLog($, reading))
+      await logQueue
+    }
   }
   shown = newer(own, stored)
+}
+
+// register()'s options; a value of the wrong type keeps the default
+function configOf(options) {
+  const logDir = options?.logDir
+  return {
+    log: typeof options?.log === 'boolean' ? options.log : DEFAULTS.log,
+    logDir: typeof logDir === 'string' && logDir.trim() !== '' ? logDir.trim() : DEFAULTS.logDir,
+  }
+}
+
+// Appends one line for `reading` to the day's file. $.fs has no append, so the day's file is
+// read whole and written back. Never throws: a failure shows one toast per session at most.
+// Two sessions appending at the same moment could lose a line; only the session holding a newer
+// reading writes, so that takes two new readings within one read and write.
+async function appendLog($, reading) {
+  try {
+    const now = await $.clock.now()
+    const dir = await logDirPath($)
+    if (dir == null) {
+      warnLog($, 'usage-band: ホームフォルダが分からないため、使用率の記録を書けません。/config usage-band.logDir=<フォルダ> で記録の置き場を指定してください')
+      return
+    }
+    const path = dir + '/' + logFileName(now)
+    let text = ''
+    // A file that exists but cannot be read is left alone rather than overwritten
+    if (await $.fs.exists(path)) text = await $.fs.read(path)
+    if (text !== '' && !text.endsWith('\n')) text += '\n'
+    await $.fs.write(path, text + logLine(reading, now) + '\n')
+  } catch (error) {
+    warnLog($, 'usage-band: 使用率の記録を書けませんでした（' + String(error?.message ?? error) + '）')
+  }
+}
+
+function warnLog($, text) {
+  if (logWarned) return
+  logWarned = true
+  $.ui.toast(text)
+}
+
+// logDir as an absolute path with forward slashes and no trailing slash; a leading `~` is the
+// home folder (USERPROFILE on Windows, else HOME). null when `~` is used and neither is set.
+async function logDirPath($) {
+  let dir = config.logDir.replace(/\\/g, '/')
+  if (dir === '~' || dir.startsWith('~/')) {
+    const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME'))
+    if (!home) return null
+    dir = home.replace(/\\/g, '/').replace(/\/+$/, '') + dir.slice(1)
+  }
+  return dir.length > 1 ? dir.replace(/\/+$/, '') : dir
+}
+
+// usage-YYYYMMDD.jsonl, by the local date
+function logFileName(ms) {
+  const d = new Date(ms)
+  const pad = (n) => String(n).padStart(2, '0')
+  return 'usage-' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '.jsonl'
+}
+
+// One JSON object: ts (when written) and, per window kind, the raw percentage and reset time
+function logLine(reading, now) {
+  const line = { ts: new Date(now).toISOString() }
+  for (const limit of reading.rateLimits) {
+    line[limit.kind] = { used: limit.percentUsed, resets_at: limit.resetsAt ?? null }
+  }
+  return JSON.stringify(line)
 }
 
 // A stored value as a reading, or null when it is not one (unset, or written by something else)

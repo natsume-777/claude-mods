@@ -1,6 +1,20 @@
 {
   "name": "usage-band",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Shows context, 5-hour and weekly limit usage in the band above the prompt",
-  "author": { "name": "Natsume777" }
+  "author": { "name": "Natsume777" },
+  "userConfig": {
+    "log": {
+      "type": "boolean",
+      "title": "使用率を記録する",
+      "description": "5 時間制限と週間制限の使用率を、新しい値を読むたびに日ごとのファイル（usage-YYYYMMDD.jsonl）に 1 行ずつ書き足す",
+      "default": false
+    },
+    "logDir": {
+      "type": "string",
+      "title": "記録の置き場",
+      "description": "記録のファイルを書くフォルダ。~ はホームフォルダ",
+      "default": "~/.claude/usage-band/"
+    }
+  }
 }
