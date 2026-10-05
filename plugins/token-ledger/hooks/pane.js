@@ -36,13 +36,14 @@ import {
   pct,
   duration,
   modelShort,
+  modelsLine,
   localOffsetMinutes,
   handoffId,
   handoffFile,
   handoffDraft,
 } from './ledger.js'
 import { SPACE, COLOR, BUTTON, choice, dim, inline, cell, slot, tableRow, field, section, details, page } from './style.js'
-import { fitMeter, meterParts } from './meter.js'
+import { fitMeter, meterParts, cells } from './meter.js'
 import { GRACE_MS, guardDrawing, beginPress, hasStarted, takeOver, endPress } from './press-guard.js'
 import { atom, read, update } from 'claude-code'
 
@@ -275,34 +276,77 @@ function handoffState(h) {
 }
 
 // ----- スレッド -----
+
+// The widths of the thread list's columns in `room` cells, a row being one line cut at the
+// pane's edge: the thread (its description), its kind, its models, 要求, 重み*, 割合 and [▸].
+// As room runs out, the thread's text shortens first, then the kind's, then the kind goes,
+// then 要求, then 重み*; the models and 割合 stay. 0 is a column left out.
+const THREAD_COL = { label: [12, 28], type: [8, 16], model: [6, 13], req: 5, weight: 8, share: 6, open: 3, labelMin: 6 }
+export function threadColumns(room, modelCells) {
+  const C = THREAD_COL
+  let model = Math.min(Math.max(modelCells, C.model[0]), C.model[1])
+  const steps = [
+    { type: true, req: true, weight: true, labelMin: C.label[0] },
+    { type: false, req: true, weight: true, labelMin: C.labelMin },
+    { type: false, req: false, weight: true, labelMin: C.labelMin },
+    { type: false, req: false, weight: false, labelMin: C.labelMin },
+  ]
+  for (const [i, s] of steps.entries()) {
+    const nums = (s.req ? C.req : 0) + (s.weight ? C.weight : 0) + C.share + C.open
+    const count = 4 + (s.type ? 1 : 0) + (s.req ? 1 : 0) + (s.weight ? 1 : 0)
+    const free = room - model - nums - SPACE.column * (count - 1)
+    const isLast = i === steps.length - 1
+    if (s.type) {
+      if (free - C.label[0] < C.type[0]) continue
+      const type = Math.min(C.type[1], free - C.label[0])
+      return { label: Math.min(C.label[1], free - type), type, model, req: C.req, weight: C.weight }
+    }
+    if (free < s.labelMin && !isLast) continue
+    // Last: the models give way to keep the thread's text, then both stay at their least and
+    // what does not fit is cut at the edge
+    if (free < s.labelMin) model = Math.max(C.model[0] - 2, model - (s.labelMin - free))
+    const label = Math.max(s.labelMin, Math.min(C.label[1], room - model - nums - SPACE.column * (count - 1)))
+    return { label, type: 0, model, req: s.req ? C.req : 0, weight: s.weight ? C.weight : 0 }
+  }
+}
+
 function drawThreads($, ui, d) {
   const { agg } = d
+  const shown = agg.threads.slice(0, MAX_ROWS)
+  const models = new Map(shown.map((t) => [t.key, modelsLine(t.models)]))
+  // The page's padding and the section's indent come off the pane's width
+  const col = threadColumns(d.width - 2 * SPACE.page - SPACE.indent, Math.max(0, ...[...models.values()].map(cells)))
   const rows = [
     tableRow(ui, 'thread-head', [
-      head(ui, 22, 'スレッド'),
-      head(ui, 16, '種類'),
-      head(ui, 5, '要求', 'flex-end'),
-      head(ui, 8, '重み*', 'flex-end'),
-      head(ui, 6, '割合', 'flex-end'),
-    ]),
+      head(ui, col.label, 'スレッド'),
+      col.type ? head(ui, col.type, '種類') : null,
+      head(ui, col.model, 'モデル'),
+      col.req ? head(ui, col.req, '要求', 'flex-end') : null,
+      col.weight ? head(ui, col.weight, '重み*', 'flex-end') : null,
+      head(ui, THREAD_COL.share, '割合', 'flex-end'),
+    ].filter(Boolean)),
   ]
-  for (const t of agg.threads.slice(0, MAX_ROWS)) {
+  for (const t of shown) {
     const meta = d.threads[t.key] ?? {}
     rows.push(
       tableRow(ui, keyOf('thread', t.key), [
-        cell(ui, 22, t.label, t.key === 'main' ? { bold: true } : {}),
-        cell(ui, 16, t.agentType, { dimColor: true }),
-        num(ui, 5, t.requests),
-        num(ui, 8, short(t.weighted)),
-        num(ui, 6, pct(t.weighted, agg.total.weighted)),
-        slot(ui, 3, [openButton($, ui, d, t.key)]),
-      ]),
+        cell(ui, col.label, t.label, t.key === 'main' ? { bold: true } : {}),
+        col.type ? cell(ui, col.type, t.agentType, { dimColor: true }) : null,
+        cell(ui, col.model, models.get(t.key)),
+        col.req ? num(ui, col.req, t.requests) : null,
+        col.weight ? num(ui, col.weight, short(t.weighted)) : null,
+        num(ui, THREAD_COL.share, pct(t.weighted, agg.total.weighted)),
+        slot(ui, THREAD_COL.open, [openButton($, ui, d, t.key)]),
+      ].filter(Boolean)),
     )
     if (d.open === t.key) {
       const span = t.start != null ? `${clockOf(t.start, d.tz)}–${clockOf(t.end, d.tz)}` : '—'
       rows.push(
         details(ui, keyOf('thread-details', t.key), [
           t.description ? field(ui, 'd-desc', '説明', t.description, 14) : null,
+          // What the row leaves out on a narrow pane
+          col.type ? null : field(ui, 'd-type', '種類', t.agentType, 14),
+          col.req && col.weight ? null : field(ui, 'd-weight', '要求・重み', `${t.requests} 回 · 重み ${short(t.weighted)}*`, 14),
           field(ui, 'd-id', 'id', t.key, 14),
           field(ui, 'd-models', 'モデル', t.models.map(modelShort).join('、') || '—', 14),
           field(ui, 'd-span', '期間', span, 14),

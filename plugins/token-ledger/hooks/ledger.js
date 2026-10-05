@@ -227,6 +227,16 @@ export function modelShort(model) {
   return String(model ?? '?').replace(/^claude-/, '')
 }
 
+/** The model's family (opus, sonnet, haiku), else modelShort's name. */
+export function modelFamily(model) {
+  const s = String(model ?? '').toLowerCase()
+  for (const k of ['opus', 'sonnet', 'haiku']) if (s.includes(k)) return k
+  return modelShort(model)
+}
+
+/** A thread's models in a list row: their families, each once, joined by '/'. */
+export const modelsLine = (models) => [...new Set((models ?? []).map(modelFamily))].join('/') || '—'
+
 /** The local offset in minutes; 0 where Date is unavailable. */
 export function localOffsetMinutes() {
   try {

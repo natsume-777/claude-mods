@@ -1,6 +1,6 @@
 {
   "name": "token-ledger",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Shows where the session's tokens go and when a fresh session would be cheaper",
   "author": { "name": "Natsume777" },
   "types": "./types/index.d.ts",
