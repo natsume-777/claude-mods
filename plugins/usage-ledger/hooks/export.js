@@ -1,6 +1,6 @@
 // The export [書き出す] writes: the session's numbers as a Markdown summary and as one JSON
 // line per request, for the main conversation to read only the part a question needs (the
-// format is explained in the token-ledger-data skill the plugin ships).
+// format is explained in the usage-ledger-data skill the plugin ships).
 //
 // Pure: no $ here; pane.js does the writing. Neither file carries conversation text: numbers,
 // model ids, tool names, agent types and the Agent tool's short descriptions only.
@@ -9,7 +9,7 @@ import { aggregateThreads, TYPES, isoString, modelWeight, DEFAULT_WEIGHTS } from
 import { MAX_REQUESTS, WEIGHTS_NOTE, ESTIMATE_NOTE, getConfig, summarize, toThreads, duration } from './ledger.js'
 
 /** The skill that explains the files' format. */
-export const SKILL = 'token-ledger-data'
+export const SKILL = 'usage-ledger-data'
 
 /** The .md's `##` sections, in order. */
 export const SECTIONS = ['概要', 'スレッド', '種類とモデル', '高い要求', '主のツール', '待ちと再書込']
@@ -39,7 +39,7 @@ export function exportPaths({ dir, root, sessionId, startedAt, tzOffsetMinutes =
 }
 
 /** The line [書き出す] adds to the prompt box. */
-export const promptLine = (shownMd) => `token-ledger の集計を ${shownMd} に書き出しました。`
+export const promptLine = (shownMd) => `usage-ledger の集計を ${shownMd} に書き出しました。`
 
 // ---- Formatting
 
@@ -113,10 +113,10 @@ export function exportMarkdown(d) {
   const keyOf = (t) => (t === 'main' ? 'main' : String(t))
   const out = []
 
-  out.push('# token-ledger の集計', '')
+  out.push('# usage-ledger の集計', '')
   out.push(`この形式の説明は、スキル ${SKILL} にあります。`, '')
   out.push(`- 書き出し: ${when(d.now, tz)}（${isoLocal(d.now, tz).slice(23)}）`)
-  out.push(`- 集計範囲: 集計開始 ${when(d.startedAt, tz)} から書き出しまで。集計開始は token-ledger が読み込まれた時刻で、それより前の主スレッドの要求は含まない`)
+  out.push(`- 集計範囲: 集計開始 ${when(d.startedAt, tz)} から書き出しまで。集計開始は usage-ledger が読み込まれた時刻で、それより前の主スレッドの要求は含まない`)
   if (requests.length >= MAX_REQUESTS) out.push(`- 要求は新しい ${MAX_REQUESTS} 件だけを残している（古いものは捨てた）`)
   out.push(`- セッション: ${d.sessionId ?? '—'}`)
   if (d.jsonlName) out.push(`- 要求ごとの記録: ${d.jsonlName}（1 行 1 要求）`)

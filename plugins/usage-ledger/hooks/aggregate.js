@@ -311,7 +311,7 @@ export function aggregateThreads(threads, opts = {}) {
   };
 }
 
-// ---- Live use (token-ledger): one turn.step result, the break-even, the band's summary
+// ---- Live use (usage-ledger): one turn.step result, the break-even, the band's summary
 
 const TTL_MS = { '5m': 300000, '1h': 3600000 };
 /** Context at or above this is "heavy": the pane's overview marks it. */

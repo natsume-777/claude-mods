@@ -3,8 +3,8 @@
 // register.js  the events: each model request (turn.step) into $.state, which subagent is
 //              which ($.agent.list, classic.SubagentStart, the Agent tool's result), a
 //              finished subagent's requests read back from its transcript, the handoff marker
-//              in a new session's first prompt, the timers, /token-ledger's registration
-// pane.js      the pane (one, with views), /token-ledger, the band above the prompt,
+//              in a new session's first prompt, the timers, /usage-ledger's registration
+// pane.js      the pane (one, with views), /usage-ledger, the band above the prompt,
 //              [引き継ぐ…] and [書き出す]
 // export.js    the two files [書き出す] writes, a .md summary and a .jsonl of the requests (pure)
 // meter.js     the gauge line `トークン ■■■□□ OK`, drawn as usage-band draws its meters (pure)
@@ -36,11 +36,11 @@ import { registerPane } from './pane.js'
 import { update } from 'claude-code'
 
 // The state this file writes (declared in types/index.d.ts)
-const REQUESTS = { plugin: 'token-ledger', key: 'requests' }
-const THREADS = { plugin: 'token-ledger', key: 'threads' }
-const STARTED_AT = { plugin: 'token-ledger', key: 'startedAt' }
-const HANDOFF = { plugin: 'token-ledger', key: 'handoff' }
-const INCOMING = { plugin: 'token-ledger', key: 'incoming' }
+const REQUESTS = { plugin: 'usage-ledger', key: 'requests' }
+const THREADS = { plugin: 'usage-ledger', key: 'threads' }
+const STARTED_AT = { plugin: 'usage-ledger', key: 'startedAt' }
+const HANDOFF = { plugin: 'usage-ledger', key: 'handoff' }
+const INCOMING = { plugin: 'usage-ledger', key: 'incoming' }
 
 // The $.store key of the context sizes observed in earlier sessions: { fresh, base, at }
 const OBSERVED_KEY = 'observed'
@@ -64,7 +64,7 @@ export function register(on, options) {
 
   // Fires on the session's start, and again after a hot reload (which drops the timers)
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'token-ledger', description: 'このセッションのトークンの内訳を開く' })
+    await $.command.register({ name: 'usage-ledger', description: 'このセッションのトークンの内訳を開く' })
     const now = await $.clock.now()
     const started = await $.state.get(STARTED_AT)
     if (typeof started.value !== 'number') await $.state.set(STARTED_AT, now)
@@ -138,7 +138,7 @@ export function register(on, options) {
     return next(e)
   })
 
-  // The pane, /token-ledger and the band
+  // The pane, /usage-ledger and the band
   registerPane(on)
 }
 

@@ -21,8 +21,8 @@
       "description": "Shows how long the prompt cache has left, next to the model name in the footer"
     },
     {
-      "name": "token-ledger",
-      "source": "./plugins/token-ledger",
+      "name": "usage-ledger",
+      "source": "./plugins/usage-ledger",
       "description": "Shows where the session's tokens go and when a fresh session would be cheaper"
     }
   ]

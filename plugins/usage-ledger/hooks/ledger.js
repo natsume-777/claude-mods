@@ -1,4 +1,4 @@
-// The pure parts token-ledger's hook files share: its options, the context sizes observed in
+// The pure parts usage-ledger's hook files share: its options, the context sizes observed in
 // earlier sessions, the live requests turned into aggregate.js's threads, number and time
 // formatting, and the handoff's id, file name, draft and marker.
 //
@@ -7,7 +7,7 @@
 import { summaryForBand, contextForRuns, IDLE_WARN_MS, isoString } from './aggregate.js'
 
 /** The pane's id ($.ui.open, the Pane matcher) and the slash command's name. */
-export const PANE = 'token-ledger'
+export const PANE = 'usage-ledger'
 
 /** At most this many requests are kept in $.state; the oldest go first. */
 export const MAX_REQUESTS = 5000
@@ -34,7 +34,7 @@ export const VIEWS = [
   { id: 'handoff', label: '引き継ぎ' },
 ]
 
-const DEFAULTS = { ttlMain: '1h', ttlSub: '5m', freshCtx: 70000, baseCtx: 40000, handoffDir: '.claude/handoffs/', exportDir: '.claude/token-ledger/', showBand: true }
+const DEFAULTS = { ttlMain: '1h', ttlSub: '5m', freshCtx: 70000, baseCtx: 40000, handoffDir: '.claude/handoffs/', exportDir: '.claude/usage-ledger/', showBand: true }
 
 // The options register() received, defaults filled in
 let config = { ...DEFAULTS }
@@ -250,7 +250,7 @@ export function localOffsetMinutes() {
 // ---- Handoff
 
 /** The marker the new session's first message carries. */
-export const HANDOFF_MARK = /\[token-ledger handoff ([0-9]{8}-[0-9]{4}-[0-9a-z]{4})\]/
+export const HANDOFF_MARK = /\[usage-ledger handoff ([0-9]{8}-[0-9]{4}-[0-9a-z]{4})\]/
 
 /** The $.store key of one handoff's record. */
 export const handoffKey = (id) => 'handoff:' + id
@@ -276,7 +276,7 @@ export function handoffDraft({ file, id }) {
   return [
     `${file} に引き継ぎ文を書いてください。`,
     '中身は「目標・今の段階・決めたこと・未解決・最初に読むファイル」の 5 項目で、各 5 行以内、全体で 1.5k トークン以内にします。会話の本文は写さないでください。',
-    `書いたら、その本文と目印 [token-ledger handoff ${id}] を最初の発言にして、新しいセッションを開いてください。`,
+    `書いたら、その本文と目印 [usage-ledger handoff ${id}] を最初の発言にして、新しいセッションを開いてください。`,
     '新しいセッションからはこのファイルが見えないことがあるので、本文は最初の発言に含めてください。',
     '開く前に、どのツールで何を開くかを私に確認してください。',
   ].join('\n')

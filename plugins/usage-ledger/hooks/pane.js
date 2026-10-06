@@ -1,4 +1,4 @@
-// The pane /token-ledger opens, the band above the prompt, and the handoff the pane and the
+// The pane /usage-ledger opens, the band above the prompt, and the handoff the pane and the
 // band start.
 //
 // The pane is one, its view ($.state `view`) switching what it draws, since a second pane
@@ -49,13 +49,13 @@ import { GRACE_MS, guardDrawing, beginPress, hasStarted, takeOver, endPress } fr
 import { atom, read, update } from 'claude-code'
 
 // The state this file reads and writes (declared in types/index.d.ts)
-const view = atom({ plugin: 'token-ledger', key: 'view' }, 'status')
-const REQUESTS = { plugin: 'token-ledger', key: 'requests' }
-const THREADS = { plugin: 'token-ledger', key: 'threads' }
-const STARTED_AT = { plugin: 'token-ledger', key: 'startedAt' }
-const OPEN = { plugin: 'token-ledger', key: 'open' }
-const HANDOFF = { plugin: 'token-ledger', key: 'handoff' }
-const INCOMING = { plugin: 'token-ledger', key: 'incoming' }
+const view = atom({ plugin: 'usage-ledger', key: 'view' }, 'status')
+const REQUESTS = { plugin: 'usage-ledger', key: 'requests' }
+const THREADS = { plugin: 'usage-ledger', key: 'threads' }
+const STARTED_AT = { plugin: 'usage-ledger', key: 'startedAt' }
+const OPEN = { plugin: 'usage-ledger', key: 'open' }
+const HANDOFF = { plugin: 'usage-ledger', key: 'handoff' }
+const INCOMING = { plugin: 'usage-ledger', key: 'incoming' }
 
 const TITLE = 'トークンの内訳'
 const TYPE_LABEL = { input: '入力', cache_read: 'キャッシュ読み', cache_write_5m: '書き 5m', cache_write_1h: '書き 1h', output: '出力' }
@@ -70,14 +70,14 @@ const keyOf = (prefix, id) => prefix + '-' + String(id).replace(/[^A-Za-z0-9_-]/
 async function go($, id) {
   await update($, view, () => id)
   try {
-    await $.ui.scroll({ in: 'token-ledger', to: 'start' })
+    await $.ui.scroll({ in: 'usage-ledger', to: 'start' })
   } catch {}
 }
 
-// Opens the pane at view `id`: /token-ledger and the band's [詳しく]
+// Opens the pane at view `id`: /usage-ledger and the band's [詳しく]
 async function openPane($, id) {
   await update($, view, () => id)
-  return $.ui.open({ id: 'token-ledger', title: TITLE })
+  return $.ui.open({ id: 'usage-ledger', title: TITLE })
 }
 
 // Opens one row's details in a view, or closes them when pressed again
@@ -169,7 +169,7 @@ function drawHeader($, ui, d) {
   const nav = VIEWS.map((v) =>
     ui.Button({ key: 'view-' + v.id, label: v.label, ...choice(d.view === v.id), onPress: () => go($, v.id) }),
   )
-  nav.push(ui.Button({ key: 'close', label: '閉じる', role: 'dismiss', ...BUTTON.nav, onPress: () => $.ui.close({ id: 'token-ledger' }) }))
+  nav.push(ui.Button({ key: 'close', label: '閉じる', role: 'dismiss', ...BUTTON.nav, onPress: () => $.ui.close({ id: 'usage-ledger' }) }))
   return ui.Box({
     key: 'header',
     flexDirection: 'column',
@@ -554,7 +554,7 @@ function drawHandoff($, ui, d) {
     const lines = [
       field(ui, 'out-state', '状態', handoffState(h)),
       field(ui, 'out-file', 'ファイル', h.file),
-      field(ui, 'out-id', '目印', `[token-ledger handoff ${h.id}]`),
+      field(ui, 'out-id', '目印', `[usage-ledger handoff ${h.id}]`),
     ]
     if (h.observed.length > 0) lines.push(field(ui, 'out-observed', '新しいセッション', h.observed.map(short).join(' → ')))
     blocks.push(section(ui, 'handoff-out', 'このセッションからの引き継ぎ', lines))
@@ -637,17 +637,17 @@ function drawBand($, ui, s, g, surface, columns) {
     children.push(Box({ key: 'band-phrase', flexShrink: 1, minWidth: 0, children: [Text({ wrap: 'truncate-end', ...(color ? { color } : {}), children: [phrase] })] }))
   }
   children.push(...actions.map((a) => Box({ key: a.key + '-slot', flexShrink: 0, children: [Button(a)] })))
-  return Box({ key: 'token-ledger-band', flexDirection: 'row', flexWrap: 'nowrap', columnGap: 1, alignItems: 'center', children })
+  return Box({ key: 'usage-ledger-band', flexDirection: 'row', flexWrap: 'nowrap', columnGap: 1, alignItems: 'center', children })
 }
 
 export function registerPane(on) {
-  // /token-ledger opens the pane at its first view, 状況
-  on('command.run', { command: 'token-ledger' }, async ($) => {
+  // /usage-ledger opens the pane at its first view, 状況
+  on('command.run', { command: 'usage-ledger' }, async ($) => {
     const opened = await openPane($, 'status')
     return { text: opened.isPlaced ? 'トークンの内訳を開きました' : 'トークンの内訳を開きました（まだ表示されていません）' }
   })
 
-  on('ui.render', { component: 'Pane', requestId: 'token-ledger' }, async ($, e) => {
+  on('ui.render', { component: 'Pane', requestId: 'usage-ledger' }, async ($, e) => {
     const guard = guardDrawing(e.requestId)
     const ui = guard.wrap($.ui.resolve(e))
     const d = await gather($, e)
@@ -671,7 +671,7 @@ export function registerPane(on) {
   // (press-guard.js) it also checks that the press reached the Button's onPress; when the chain
   // settled, threw, or stayed silent for GRACE_MS without it, the press runs once with the
   // latest drawing's closure under the same key.
-  on('ui.press', { plugin: 'token-ledger' }, async ($, e, next) => {
+  on('ui.press', { plugin: 'usage-ledger' }, async ($, e, next) => {
     const record = beginPress(e)
     const chain = next(e).then(
       (value) => ({ kind: 'value', value }),

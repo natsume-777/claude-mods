@@ -1,6 +1,6 @@
 {
-  "name": "token-ledger",
-  "version": "0.2.0",
+  "name": "usage-ledger",
+  "version": "0.3.0",
   "description": "Shows where the session's tokens go and when a fresh session would be cheaper",
   "author": { "name": "Natsume777" },
   "types": "./types/index.d.ts",
@@ -41,7 +41,7 @@
       "type": "string",
       "title": "集計の書き出し先",
       "description": "[書き出す] で集計を書くフォルダ（プロジェクトからの相対パス）",
-      "default": ".claude/token-ledger/"
+      "default": ".claude/usage-ledger/"
     },
     "showBand": {
       "type": "boolean",
