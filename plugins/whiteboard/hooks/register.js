@@ -34,8 +34,9 @@ const TOOLS = {
       '進行中の手順やチェックリスト、並行して動かしている処理の状況、このセッションに関わる URL、決めたこと。' +
       '同じ id のカードは上書きされ（位置は変わらない）、状況が変わったら同じ id で更新する。1 カード 1 話題にして、本文は要点だけにする。' +
       '用が済んだカードは remove_card で消す。会話にもう書いたことを、ただ写すためには使わない。' +
-      'body は Markdown。図は mermaid や ASCII のテキストで書くと、コードブロックとして読める形で表示される（描画はされない）。' +
+      'body は Markdown。```mermaid の基本的な flowchart / graph（と、参加者と矢印だけの sequenceDiagram）は図になる。それ以外の図（mermaid の別の種類、ASCII など）は、コードブロックとして読める形で表示される（描画はされない）。' +
       '関係や流れは、箇条書きや表でも伝わる。' +
+      'pin: true は、人が常に見ていたいカード（今の手順の全体像、URL の一覧など）に使う。使いすぎない。固定したカードは一覧の上に並ぶ。' +
       `上限: ${LIMITS.cards} 枚、title ${LIMITS.title} 文字、body ${LIMITS.body} 文字、id は英数字と _ - の ${LIMITS.id} 文字まで。` +
       '会話の圧縮などで内容を思い出せないときは list_cards で読み返す。',
     inputSchema: {
@@ -44,6 +45,7 @@ const TOOLS = {
         id: { type: 'string', description: `カードの名前。短い英数字と _ -（例: plan, urls, jobs）。${LIMITS.id} 文字まで` },
         title: { type: 'string', description: `カードの見出し。${LIMITS.title} 文字まで` },
         body: { type: 'string', description: `本文（Markdown）。${LIMITS.body} 文字まで。空でもよい` },
+        pin: { type: 'boolean', description: 'true で先頭に固定、false で固定を外す。省略すると今のまま（新しいカードは固定なし）' },
       },
       required: ['id', 'title', 'body'],
     },
@@ -111,12 +113,15 @@ async function listAgents($) {
 }
 
 // Takes the background work an event carries (`background_tasks`, `session_crons`) as the
-// snapshot of its kind, and writes it only if it differs from the one held
+// snapshot of its kind, stamped with the time, and writes it only if it differs from the one
+// held (the time included, while something is in flight)
 async function noteBackground($, e) {
+  if (!Array.isArray(e?.background_tasks) && !Array.isArray(e?.session_crons)) return
+  const now = await $.clock.now()
   await exclusiveBackground(async () => {
     const { value } = await $.state.get(BACKGROUND)
     const before = snapshotOf(value)
-    const after = replaceSnapshot(before, e)
+    const after = replaceSnapshot(before, e, now)
     if (!isSame(before, after)) await $.state.set(BACKGROUND, after)
   })
 }

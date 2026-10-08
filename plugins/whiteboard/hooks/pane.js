@@ -2,9 +2,9 @@
 //
 // The pane starts with a section of its own, 並行処理, while any subagent is running or has just
 // finished, or background work (commands, monitors, workflows, crons) is in flight as of the last
-// Stop (left out otherwise): read only, kept apart from the cards. Then the cards in the
-// order they were added: a title, a dim line with the id and the time of the last write, and the
-// body as Markdown (handed over as written). It has no buttons: the person reads, Claude writes.
+// Stop (left out otherwise): read only, kept apart from the cards. Then the cards, the pinned
+// ones first and each group in the order they were added: a title, a dim line with the id and the time of the last write, and the
+// body as Markdown (handed over as written, except that a mermaid fence mermaid.js can draw is an Svg). It has no buttons: the person reads, Claude writes.
 // The band is one short line, the card count and the running subagents' count with a button that
 // opens the pane, and is left out while there is neither a card nor a running subagent. The
 // background work is not counted in it: its snapshot can be old.
@@ -13,9 +13,10 @@
 // them again; nothing here calls $.ui.invalidate or draws on a timer (in the desktop app every
 // redraw rebuilds every mod's drawing, other mods' open panes included).
 
-import { fitBand, clockOf } from './board.js'
+import { fitBand, clockOf, orderedCards } from './board.js'
 import { viewOf, runningOf } from './agents.js'
 import { rowsOf, snapshotOf } from './background.js'
+import { mermaidSvg, splitFences } from './mermaid.js'
 
 // The state this file reads (declared in types/index.d.ts); unset until the cards are loaded
 const CARDS = { plugin: 'whiteboard', key: 'cards' }
@@ -57,8 +58,47 @@ function openPane($) {
   return $.ui.open({ id: PANE_ID, title: TITLE })
 }
 
-function drawCard(ui, card) {
-  const { Box, Text, Markdown } = ui
+// A card's body. The Markdown element shows a mermaid fence as a code block, so on a surface with
+// Svg the fences mermaid.js can draw become pictures, the rest of the body staying Markdown as
+// written (a fence it cannot draw too). With none drawn the body is one Markdown, untouched.
+function drawBody(ui, card, view) {
+  const { Box, Markdown, Svg } = ui
+  const whole = () => Markdown({ key: keyOf('body', card.id), text: card.body })
+  if (view.surface === 'terminal' || typeof Svg !== 'function' || !/mermaid/i.test(card.body)) return whole()
+  const items = []
+  let drawn = 0
+  const addText = (text) => {
+    if (items.at(-1)?.text !== undefined) items[items.length - 1].text += '\n' + text
+    else items.push({ text })
+  }
+  for (const piece of splitFences(card.body)) {
+    const picture = piece.type === 'mermaid' ? mermaidSvg(piece.source) : null
+    if (picture) {
+      items.push({ picture })
+      drawn++
+    } else {
+      addText(piece.type === 'mermaid' ? piece.raw : piece.text)
+    }
+  }
+  if (drawn === 0) return whole()
+  // About the cells of the pane less its borders and padding, at 8 pixels a cell
+  const room = view.columns ? Math.max(160, (view.columns - 8) * 8) : 560
+  const children = items.flatMap((item, n) => {
+    if (item.text !== undefined) return item.text.trim() === '' ? [] : [Markdown({ key: keyOf('body', card.id) + '-' + n, text: item.text })]
+    const { picture } = item
+    const scale = Math.min(1, room / picture.width)
+    return [
+      Box({
+        key: keyOf('diagram', card.id) + '-' + n,
+        children: [Svg({ source: picture.source, alt: picture.alt, width: Math.round(picture.width * scale), height: Math.round(picture.height * scale) })],
+      }),
+    ]
+  })
+  return Box({ key: keyOf('body', card.id), flexDirection: 'column', rowGap: 1, children })
+}
+
+function drawCard(ui, card, view) {
+  const { Box, Text } = ui
   const children = [
     Box({
       key: keyOf('head', card.id),
@@ -67,11 +107,12 @@ function drawCard(ui, card) {
       columnGap: 2,
       children: [
         Text({ bold: true, wrap: 'wrap', children: [card.title] }),
+        ...(card.pinned === true ? [Text({ dimColor: true, children: ['固定'] })] : []),
         Text({ dimColor: true, children: [`${card.id} · ${clockOf(card.updatedAt)}`] }),
       ],
     }),
   ]
-  if (card.body.trim() !== '') children.push(Markdown({ key: keyOf('body', card.id), text: card.body }))
+  if (card.body.trim() !== '') children.push(drawBody(ui, card, view))
   return Box({ key: keyOf('card', card.id), flexDirection: 'column', width: '100%', borderStyle: 'round', borderDimColor: true, paddingX: 1, children })
 }
 
@@ -136,7 +177,7 @@ function drawAgents(ui, view, background) {
         key: 'bg',
         flexDirection: 'column',
         children: [
-          Box({ key: 'bg-head', children: [Text({ dimColor: true, children: ['バックグラウンド · ターン終了時点'] })] }),
+          Box({ key: 'bg-head', children: [Text({ dimColor: true, children: [background.at === null ? 'バックグラウンド · ターン終了時点' : `バックグラウンド · ターン終了時点 ${clockOf(background.at)}`] })] }),
           ...background.rows.map((row) => drawBackgroundRow(ui, row)),
           ...(background.more > 0 ? [Box({ key: 'bg-more', children: [Text({ dimColor: true, children: [`ほか ${background.more} 件`] })] })] : []),
         ],
@@ -147,7 +188,7 @@ function drawAgents(ui, view, background) {
 }
 
 // The cards' blocks: a note and a box each, or what to ask for while there are none
-function drawCards(ui, cards) {
+function drawCards(ui, cards, view) {
   const { Box, Text } = ui
   if (cards.length === 0) {
     return [
@@ -159,15 +200,15 @@ function drawCards(ui, cards) {
   }
   return [
     Box({ key: 'about', children: [Text({ dimColor: true, wrap: 'wrap', children: [`${cards.length} 件 · 書き換えは Claude に頼んでください`] })] }),
-    ...cards.map((card) => drawCard(ui, card)),
+    ...orderedCards(cards).map((card) => drawCard(ui, card, view)),
   ]
 }
 
-function drawPane(ui, cards, agents, snapshot) {
-  const view = viewOf(agents)
+function drawPane(ui, cards, agents, snapshot, view) {
+  const subagents = viewOf(agents)
   const background = rowsOf(snapshot)
-  const section = view.running.length + view.done.length + background.rows.length > 0 ? [drawAgents(ui, view, background)] : []
-  return ui.Box({ key: 'whiteboard', flexDirection: 'column', rowGap: 1, paddingX: 1, width: '100%', children: [...section, ...drawCards(ui, cards)] })
+  const section = subagents.running.length + subagents.done.length + background.rows.length > 0 ? [drawAgents(ui, subagents, background)] : []
+  return ui.Box({ key: 'whiteboard', flexDirection: 'column', rowGap: 1, paddingX: 1, width: '100%', children: [...section, ...drawCards(ui, cards, view)] })
 }
 
 function drawBand($, ui, surface, columns, count, running) {
@@ -189,7 +230,7 @@ export function registerPane(on) {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
-    return drawPane($.ui.resolve(e), await cardsOf($), await agentsOf($), await backgroundOf($))
+    return drawPane($.ui.resolve(e), await cardsOf($), await agentsOf($), await backgroundOf($), { surface: e.surface, columns: widthOf(e) })
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {

@@ -27,7 +27,10 @@ const isCard = (c) =>
   typeof c.body === 'string' &&
   typeof c.updatedAt === 'number'
 
-/** The cards of a stored value: the well-formed ones, each id once, up to the limit; [] for anything else. */
+/**
+ * The cards of a stored value: the well-formed ones, each id once, up to the limit; [] for anything
+ * else. `pinned` is kept only as true; any other value is dropped (the card stays, unpinned).
+ */
 export function sanitizeCards(value) {
   if (!Array.isArray(value)) return []
   const seen = new Set()
@@ -35,7 +38,7 @@ export function sanitizeCards(value) {
   for (const c of value) {
     if (!isCard(c) || seen.has(c.id)) continue
     seen.add(c.id)
-    cards.push({ id: c.id, title: c.title, body: c.body, updatedAt: c.updatedAt })
+    cards.push({ id: c.id, title: c.title, body: c.body, updatedAt: c.updatedAt, ...(c.pinned === true ? { pinned: true } : {}) })
     if (cards.length >= LIMITS.cards) break
   }
   return cards
@@ -55,7 +58,10 @@ function idOf(input) {
   return { id }
 }
 
-/** set_card: adds a card, or overwrites the one with the same id in place. */
+/** The cards as the pane shows them: the pinned ones first, then the others; each group in the order added. */
+export const orderedCards = (cards) => [...cards.filter((c) => c.pinned === true), ...cards.filter((c) => c.pinned !== true)]
+
+/** set_card: adds a card, or overwrites the one with the same id in place. `pin` fixes it to the top (true), frees it (false), or leaves it as it was (absent). */
 export function applySet(cards, input, now) {
   const { id, error } = idOf(input)
   if (error) return { error }
@@ -66,15 +72,19 @@ export function applySet(cards, input, now) {
   if (body.length > LIMITS.body) {
     return { error: `body は ${LIMITS.body} 文字までです（受け取ったのは ${body.length} 文字）。要点に絞るか、カードを分けてください` }
   }
-  const card = { id, title, body, updatedAt: now }
+  if (input.pin !== undefined && typeof input.pin !== 'boolean') return { error: 'pin は true か false で指定してください（省略すると今のまま）' }
   const index = cards.findIndex((c) => c.id === id)
+  const was = index >= 0 && cards[index].pinned === true
+  const is = input.pin === undefined ? was : input.pin
+  const card = { id, title, body, updatedAt: now, ...(is ? { pinned: true } : {}) }
+  const pinNote = is === was ? '' : is ? '。固定しました' : '。固定を外しました'
   if (index < 0) {
     if (cards.length >= LIMITS.cards) {
       return { error: `カードは ${LIMITS.cards} 枚までで、いっぱいです。済んだカードを remove_card で消してから追加してください` }
     }
-    return { cards: [...cards, card], text: `追加しました: ${id}（全 ${cards.length + 1} 件）` }
+    return { cards: [...cards, card], text: `追加しました: ${id}（全 ${cards.length + 1} 件）${pinNote}` }
   }
-  return { cards: cards.map((c, i) => (i === index ? card : c)), text: `上書きしました: ${id}（全 ${cards.length} 件）` }
+  return { cards: cards.map((c, i) => (i === index ? card : c)), text: `上書きしました: ${id}（全 ${cards.length} 件）${pinNote}` }
 }
 
 /** remove_card: removes the card with this id; says so when there is none. */
@@ -92,10 +102,13 @@ export function applyClear(cards) {
   return { cards: [], text: `全部で ${cards.length} 件を削除しました` }
 }
 
-/** list_cards: every card's id, title and body, as JSON (a body may hold any line, so no line format is safe). */
+/**
+ * list_cards: every card's id, title and body, as JSON (a body may hold any line, so no line
+ * format is safe), in the order the pane shows them; a pinned card adds `pinned: true`.
+ */
 export function applyList(cards) {
   if (cards.length === 0) return { cards, text: 'ボードにカードはありません' }
-  return { cards, text: JSON.stringify(cards.map(({ id, title, body }) => ({ id, title, body }))) }
+  return { cards, text: JSON.stringify(orderedCards(cards).map(({ id, title, body, pinned }) => ({ id, title, body, ...(pinned === true ? { pinned: true } : {}) }))) }
 }
 
 // ---- The band

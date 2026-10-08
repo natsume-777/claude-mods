@@ -5,7 +5,7 @@
 // workflows, and the crons that will wake the session. The only source is the `background_tasks`
 // and `session_crons` of a Stop and a SubagentStop, so what is kept is a snapshot as of the
 // last of those events; each kind is replaced whole, and nothing that is gone is remembered.
-// Kept in $.state for the session only: { tasks, crons }.
+// Kept in $.state for the session only: { tasks, crons, at } (`at`: the time of that event).
 
 /** What is shown at most (tasks and crons together); the rest is counted. */
 export const BACKGROUND_LIMITS = {
@@ -51,25 +51,29 @@ export function normalizeCrons(value) {
 }
 
 /**
- * The snapshot after an event: each kind the event carries (an array, even an empty one) replaces
- * the one before; a kind it does not carry stays. `before` may be unset (an empty snapshot).
+ * The snapshot after an event at time `now`: each kind the event carries (an array, even an empty
+ * one) replaces the one before; a kind it does not carry stays. `at` is the time of the last event
+ * that carried one, kept while nothing is in flight (and nothing was). `before` may be unset.
  */
-export function replaceSnapshot(before, event) {
-  return {
-    tasks: Array.isArray(event?.background_tasks) ? normalizeTasks(event.background_tasks) : snapshotOf(before).tasks,
-    crons: Array.isArray(event?.session_crons) ? normalizeCrons(event.session_crons) : snapshotOf(before).crons,
-  }
+export function replaceSnapshot(before, event, now = null) {
+  const old = snapshotOf(before)
+  if (!Array.isArray(event?.background_tasks) && !Array.isArray(event?.session_crons)) return old
+  const tasks = Array.isArray(event?.background_tasks) ? normalizeTasks(event.background_tasks) : old.tasks
+  const crons = Array.isArray(event?.session_crons) ? normalizeCrons(event.session_crons) : old.crons
+  if (tasks.length + crons.length + old.tasks.length + old.crons.length === 0) return old
+  return { tasks, crons, at: now }
 }
 
-/** A stored value as a snapshot: the lists it holds, [] for a kind it does not. */
+/** A stored value as a snapshot: the lists it holds, [] for a kind it does not; `at` its time or null. */
 export const snapshotOf = (value) => ({
   tasks: Array.isArray(value?.tasks) ? value.tasks : [],
   crons: Array.isArray(value?.crons) ? value.crons : [],
+  at: typeof value?.at === 'number' ? value.at : null,
 })
 
-/** What is shown: { rows, more }. A row is { key, kind, text, state, isRunning }; `more` counts those past the limit. */
+/** What is shown: { rows, more, at }. A row is { key, kind, text, state, isRunning }; `more` counts those past the limit. */
 export function rowsOf(snapshot) {
-  const { tasks, crons } = snapshotOf(snapshot)
+  const { tasks, crons, at } = snapshotOf(snapshot)
   const all = [
     ...tasks.map((t) => ({
       key: 'task-' + t.id,
@@ -80,5 +84,5 @@ export function rowsOf(snapshot) {
     })),
     ...crons.map((c) => ({ key: 'cron-' + c.id, kind: '予約', text: c.text, state: c.recurring ? 'くり返し' : '1 回', isRunning: false })),
   ]
-  return { rows: all.slice(0, BACKGROUND_LIMITS.rows), more: Math.max(0, all.length - BACKGROUND_LIMITS.rows) }
+  return { rows: all.slice(0, BACKGROUND_LIMITS.rows), more: Math.max(0, all.length - BACKGROUND_LIMITS.rows), at }
 }

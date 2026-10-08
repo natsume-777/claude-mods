@@ -7,6 +7,8 @@ export type WhiteboardCard = {
   title: string
   body: string
   updatedAt: number
+  /** True for a card fixed to the top of the pane; absent otherwise. */
+  pinned?: true
 }
 
 /** One subagent in the pane's 並行処理 section. The text is shown as it came. */
@@ -53,8 +55,8 @@ declare module 'claude-code' {
       cards: WhiteboardCard[]
       /** The running subagents and the last few finished ones, in the order they started. Never stored. */
       agents: WhiteboardAgent[]
-      /** The background work as of the last Stop or SubagentStop: each kind replaced whole, nothing remembered once gone. Never stored. */
-      background: { tasks: WhiteboardBackgroundTask[]; crons: WhiteboardCron[] }
+      /** The background work as of the last Stop or SubagentStop (`at`, epoch ms): each kind replaced whole, nothing remembered once gone. Never stored. */
+      background: { tasks: WhiteboardBackgroundTask[]; crons: WhiteboardCron[]; at: number | null }
     }
   }
 }
