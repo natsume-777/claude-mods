@@ -1,11 +1,13 @@
 // The pane the board opens in, /whiteboard, and the band above the prompt.
 //
 // The pane starts with a section of its own, 並行処理, while any subagent is running or has just
-// finished (left out otherwise): read only, kept apart from the cards. Then the cards in the
+// finished, or background work (commands, monitors, workflows, crons) is in flight as of the last
+// Stop (left out otherwise): read only, kept apart from the cards. Then the cards in the
 // order they were added: a title, a dim line with the id and the time of the last write, and the
 // body as Markdown (handed over as written). It has no buttons: the person reads, Claude writes.
 // The band is one short line, the card count and the running subagents' count with a button that
-// opens the pane, and is left out while there is neither a card nor a running subagent.
+// opens the pane, and is left out while there is neither a card nor a running subagent. The
+// background work is not counted in it: its snapshot can be old.
 //
 // Both read the cards and the subagents from $.state while they draw, so a write to either draws
 // them again; nothing here calls $.ui.invalidate or draws on a timer (in the desktop app every
@@ -13,10 +15,12 @@
 
 import { fitBand, clockOf } from './board.js'
 import { viewOf, runningOf } from './agents.js'
+import { rowsOf, snapshotOf } from './background.js'
 
 // The state this file reads (declared in types/index.d.ts); unset until the cards are loaded
 const CARDS = { plugin: 'whiteboard', key: 'cards' }
 const AGENTS = { plugin: 'whiteboard', key: 'agents' }
+const BACKGROUND = { plugin: 'whiteboard', key: 'background' }
 
 const PANE_ID = 'whiteboard'
 const TITLE = 'ボード'
@@ -41,6 +45,11 @@ async function cardsOf($) {
 async function agentsOf($) {
   const { value } = await $.state.get(AGENTS)
   return Array.isArray(value) ? value : []
+}
+
+async function backgroundOf($) {
+  const { value } = await $.state.get(BACKGROUND)
+  return snapshotOf(value)
 }
 
 // Opens the pane: /whiteboard and the band's button
@@ -88,30 +97,53 @@ function drawAgent(ui, agent) {
   return Box({ key: keyOf('agent', agent.id), flexDirection: 'column', children })
 }
 
-// The 並行処理 section: the running subagents, then the finished ones, newest first
-function drawAgents(ui, view) {
+// One piece of background work (a command, a monitor, a workflow, a cron): kind, text, state
+function drawBackgroundRow(ui, row) {
   const { Box, Text } = ui
   return Box({
-    key: 'agents',
-    flexDirection: 'column',
-    width: '100%',
-    borderStyle: 'round',
-    borderDimColor: true,
-    paddingX: 1,
+    key: keyOf('bg-row', row.key),
+    flexDirection: 'row',
+    columnGap: 1,
     children: [
-      Box({
-        key: 'agents-head',
-        flexDirection: 'row',
-        flexWrap: 'wrap',
-        columnGap: 2,
-        children: [
-          Text({ bold: true, children: ['並行処理'] }),
-          Text({ dimColor: true, children: [`実行中 ${view.running.length} · 自動で更新されます`] }),
-        ],
-      }),
-      ...[...view.running, ...view.done].map((agent) => drawAgent(ui, agent)),
+      Box({ flexShrink: 0, children: [Text({ bold: true, dimColor: !row.isRunning, children: [row.kind] })] }),
+      Box({ flexGrow: 1, flexShrink: 1, children: [Text({ wrap: 'wrap', dimColor: !row.isRunning, children: [row.text || '（説明なし）'] })] }),
+      Box({ flexShrink: 0, children: [Text(row.isRunning ? { color: 'success', children: [row.state] } : { dimColor: true, children: [row.state] })] }),
     ],
   })
+}
+
+// The 並行処理 section: the running subagents, then the finished ones, newest first; then, as of
+// the last Stop, the background work (a snapshot: it is not kept up to date between the events)
+function drawAgents(ui, view, background) {
+  const { Box, Text } = ui
+  const hasAgents = view.running.length + view.done.length > 0
+  const children = [
+    Box({
+      key: 'agents-head',
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      columnGap: 2,
+      children: [
+        Text({ bold: true, children: ['並行処理'] }),
+        Text({ dimColor: true, children: [hasAgents ? `実行中 ${view.running.length} · 自動で更新されます` : 'バックグラウンドの作業'] }),
+      ],
+    }),
+    ...[...view.running, ...view.done].map((agent) => drawAgent(ui, agent)),
+  ]
+  if (background.rows.length > 0) {
+    children.push(
+      Box({
+        key: 'bg',
+        flexDirection: 'column',
+        children: [
+          Box({ key: 'bg-head', children: [Text({ dimColor: true, children: ['バックグラウンド · ターン終了時点'] })] }),
+          ...background.rows.map((row) => drawBackgroundRow(ui, row)),
+          ...(background.more > 0 ? [Box({ key: 'bg-more', children: [Text({ dimColor: true, children: [`ほか ${background.more} 件`] })] })] : []),
+        ],
+      }),
+    )
+  }
+  return Box({ key: 'agents', flexDirection: 'column', width: '100%', borderStyle: 'round', borderDimColor: true, paddingX: 1, children })
 }
 
 // The cards' blocks: a note and a box each, or what to ask for while there are none
@@ -131,9 +163,10 @@ function drawCards(ui, cards) {
   ]
 }
 
-function drawPane(ui, cards, agents) {
+function drawPane(ui, cards, agents, snapshot) {
   const view = viewOf(agents)
-  const section = view.running.length + view.done.length > 0 ? [drawAgents(ui, view)] : []
+  const background = rowsOf(snapshot)
+  const section = view.running.length + view.done.length + background.rows.length > 0 ? [drawAgents(ui, view, background)] : []
   return ui.Box({ key: 'whiteboard', flexDirection: 'column', rowGap: 1, paddingX: 1, width: '100%', children: [...section, ...drawCards(ui, cards)] })
 }
 
@@ -156,7 +189,7 @@ export function registerPane(on) {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
-    return drawPane($.ui.resolve(e), await cardsOf($), await agentsOf($))
+    return drawPane($.ui.resolve(e), await cardsOf($), await agentsOf($), await backgroundOf($))
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {

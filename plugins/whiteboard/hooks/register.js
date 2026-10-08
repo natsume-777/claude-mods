@@ -4,6 +4,7 @@
 //              cards' load and save, the subagents' start and stop, /whiteboard's registration
 // board.js     the limits, what each tool does to the cards and answers, the band's fit (pure)
 // agents.js    the list of subagents the pane shows above the cards (pure)
+// background.js the background work shown with them: the snapshot and its rows (pure)
 // pane.js      the pane, /whiteboard, and the band above the prompt
 //
 // The cards live in $.state for the drawings to read (a write redraws them) and in $.store,
@@ -13,15 +14,18 @@
 //
 // The subagents live in $.state alone, for the session only: they are not cards, no tool reads
 // or writes them, and nothing of them goes to the store. SubagentStart and SubagentStop write
-// them, and only when the list changes.
+// them, and only when the list changes. The background work (commands, monitors, workflows,
+// crons) is the snapshot the last Stop or SubagentStop carried, also in $.state alone.
 
 import { LIMITS, storeKey, sanitizeCards, applySet, applyRemove, applyClear, applyList } from './board.js'
 import { AGENT_LIMITS, firstLine, infoOf, isShown, summaryOfMessages, attachSummary, withoutUnnamed, prune, startAgent, stopAgent, reconcile, isSame } from './agents.js'
+import { replaceSnapshot, snapshotOf } from './background.js'
 import { registerPane } from './pane.js'
 
 // The state this file writes (declared in types/index.d.ts)
 const CARDS = { plugin: 'whiteboard', key: 'cards' }
 const AGENTS = { plugin: 'whiteboard', key: 'agents' }
+const BACKGROUND = { plugin: 'whiteboard', key: 'background' }
 
 const TOOLS = {
   set_card: {
@@ -77,6 +81,7 @@ function makeQueue() {
 const exclusive = makeQueue()
 // The subagents have a queue of their own, so a tool never waits on one
 const exclusiveAgents = makeQueue()
+const exclusiveBackground = makeQueue()
 
 // The cards of this session: $.state when it holds them (kept over a hot reload), else the store's
 async function loadCards($) {
@@ -103,6 +108,17 @@ async function listAgents($) {
   } catch {
     return []
   }
+}
+
+// Takes the background work an event carries (`background_tasks`, `session_crons`) as the
+// snapshot of its kind, and writes it only if it differs from the one held
+async function noteBackground($, e) {
+  await exclusiveBackground(async () => {
+    const { value } = await $.state.get(BACKGROUND)
+    const before = snapshotOf(value)
+    const after = replaceSnapshot(before, e)
+    if (!isSame(before, after)) await $.state.set(BACKGROUND, after)
+  })
 }
 
 // The conversation of a subagent, or [] when the session cannot read it (a deny, a failure)
@@ -190,6 +206,9 @@ export function register(on) {
   // the first with a remark made on the way, so the later report must be able to replace it.
   on('classic.SubagentStop', async ($, e, next) => {
     const result = await next(e)
+    try {
+      await noteBackground($, e)
+    } catch {}
     if (!isShown(e)) return result
     try {
       await noteAgents($, e.agent_id, (list, known, now) => stopAgent(list, infoOf(e, known), now))
@@ -198,6 +217,15 @@ export function register(on) {
       if (text !== '') await noteAgents($, e.agent_id, (list) => attachSummary(list, e.agent_id, text, found.isReport))
     } catch {}
     return result
+  })
+
+  // The turn ends: the background work in flight (commands, monitors, workflows) and the crons
+  // that will wake the session. Like SubagentStop, the only event that carries them.
+  on('classic.Stop', async ($, e, next) => {
+    try {
+      await noteBackground($, e)
+    } catch {}
+    return next(e)
   })
 
   // The pane, /whiteboard and the band
