@@ -48,6 +48,22 @@ export type WhiteboardCron = {
   text: string
 }
 
+/** Another session's board as the list of the other sessions' boards shows it. */
+export type WhiteboardOtherBoard = {
+  /** The session's id (the store keys are `board:<sid>` and `meta:<sid>`). */
+  sid: string
+  /** Its first 8 plain characters: the buttons' keys (`import-<sid8>`, `drop-<sid8>`) and the archive file's name. */
+  sid8: string
+  /** Epoch ms the board was last written (the meta's, else the newest card's); null when neither is known. */
+  updatedAt: number | null
+  /** The last folder of the session's working directory; 不明 when the board has no meta. */
+  cwdName: string
+  /** The cards the board holds. */
+  count: number
+  /** The first three titles, cut to 60 characters. */
+  titles: string[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
     whiteboard: {
@@ -57,6 +73,8 @@ declare module 'claude-code' {
       agents: WhiteboardAgent[]
       /** The background work as of the last Stop or SubagentStop (`at`, epoch ms): each kind replaced whole, nothing remembered once gone. Never stored. */
       background: { tasks: WhiteboardBackgroundTask[]; crons: WhiteboardCron[]; at: number | null }
+      /** The other sessions' boards in the store: the newest few, how many more there are, the JSON size of all the other keys, and the line about the last action (or ''). Never stored. */
+      others: { boards: WhiteboardOtherBoard[]; more: number; bytes: number; notice: string }
     }
   }
 }

@@ -102,13 +102,65 @@ export function applyClear(cards) {
   return { cards: [], text: `全部で ${cards.length} 件を削除しました` }
 }
 
+/** What list_cards' search shows of a match: at most this many lines a card, each cut to this many characters. */
+export const SEARCH = { matches: 5, text: 120 }
+
+const cut = (line, max) => {
+  const chars = [...String(line)]
+  return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : String(line)
+}
+const pinnedPart = (c) => (c.pinned === true ? { pinned: true } : {})
+
+/** The matches of a card for these (lower-cased) terms: the title or id first (line 0), then the body lines holding any term. */
+function matchesOf(card, terms) {
+  const out = []
+  const holds = (text) => terms.some((t) => text.toLowerCase().includes(t))
+  if (holds(card.title) || holds(card.id)) out.push({ line: 0, text: cut(card.title, SEARCH.text) })
+  const lines = card.body.split(/\r?\n/)
+  for (let i = 0; i < lines.length && out.length < SEARCH.matches; i++) {
+    if (holds(lines[i])) out.push({ line: i + 1, text: cut(lines[i], SEARCH.text) })
+  }
+  return out.slice(0, SEARCH.matches)
+}
+
 /**
- * list_cards: every card's id, title and body, as JSON (a body may hold any line, so no line
- * format is safe), in the order the pane shows them; a pinned card adds `pinned: true`.
+ * list_cards, in the order the pane shows the cards (the pinned first). With no argument, every
+ * card's id, title and body as JSON (a body may hold any line, so no line format is safe); a
+ * pinned card adds `pinned: true`. Arguments narrow it, the first that applies winning:
+ *   id          that one card, { id, title, body, pinned? }
+ *   query       the cards holding every one of its words (split on blanks; in the id, title or body,
+ *               any case, part of a word will do), { id, title, pinned?, matches: [{ line, text }] }
+ *               (without `matches` when titles_only is there too)
+ *   titles_only { id, title, chars (the body's length), pinned? } of every card
  */
-export function applyList(cards) {
+export function applyList(cards, input = {}) {
+  const wrong = (name, type) => ({ error: `${name} は${type}で指定してください` })
+  if (input.id !== undefined && typeof input.id !== 'string') return wrong('id', '文字列')
+  if (input.query !== undefined && typeof input.query !== 'string') return wrong('query', '文字列')
+  if (input.titles_only !== undefined && typeof input.titles_only !== 'boolean') return wrong('titles_only', ' true か false')
+  const id = typeof input.id === 'string' ? input.id.trim() : ''
+  if (id !== '') {
+    const card = cards.find((c) => c.id === id)
+    if (!card) return { cards, text: `${id} というカードはありません` }
+    return { cards, text: JSON.stringify({ id: card.id, title: card.title, body: card.body, ...pinnedPart(card) }) }
+  }
   if (cards.length === 0) return { cards, text: 'ボードにカードはありません' }
-  return { cards, text: JSON.stringify(orderedCards(cards).map(({ id, title, body, pinned }) => ({ id, title, body, ...(pinned === true ? { pinned: true } : {}) }))) }
+  const ordered = orderedCards(cards)
+  const terms = typeof input.query === 'string' ? input.query.split(/\s+/).filter((t) => t !== '') : []
+  if (terms.length > 0) {
+    const lower = terms.map((t) => t.toLowerCase())
+    const found = ordered.filter((c) => {
+      const text = (c.id + '\n' + c.title + '\n' + c.body).toLowerCase()
+      return lower.every((t) => text.includes(t))
+    })
+    if (found.length === 0) return { cards, text: `見つかりませんでした: ${terms.join(' ')}` }
+    const rows = found.map((c) => ({ id: c.id, title: c.title, ...pinnedPart(c), ...(input.titles_only === true ? {} : { matches: matchesOf(c, lower) }) }))
+    return { cards, text: JSON.stringify(rows) }
+  }
+  if (input.titles_only === true) {
+    return { cards, text: JSON.stringify(ordered.map((c) => ({ id: c.id, title: c.title, chars: c.body.length, ...pinnedPart(c) }))) }
+  }
+  return { cards, text: JSON.stringify(ordered.map((c) => ({ id: c.id, title: c.title, body: c.body, ...pinnedPart(c) }))) }
 }
 
 // ---- The band

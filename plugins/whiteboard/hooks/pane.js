@@ -1,61 +1,39 @@
-// The pane the board opens in, /whiteboard, and the band above the prompt.
+// What the pane and the band draw (pure: no $ here; register.js reads the state, hands the values
+// over with the actions the Buttons run, and registers the hooks).
 //
 // The pane starts with a section of its own, 並行処理, while any subagent is running or has just
 // finished, or background work (commands, monitors, workflows, crons) is in flight as of the last
 // Stop (left out otherwise): read only, kept apart from the cards. Then the cards, the pinned
-// ones first and each group in the order they were added: a title, a dim line with the id and the time of the last write, and the
-// body as Markdown (handed over as written, except that a mermaid fence mermaid.js can draw is an Svg). It has no buttons: the person reads, Claude writes.
+// ones first and each group in the order they were added: a title, a dim line with the id and the
+// time of the last write, and the body as Markdown (handed over as written, except that a mermaid
+// fence mermaid.js can draw is an Svg). The cards have no buttons: the person reads, Claude
+// writes. Last, while there are other sessions' boards, a list of them with [取り込む] and [消す].
 // The band is one short line, the card count and the running subagents' count with a button that
 // opens the pane, and is left out while there is neither a card nor a running subagent. The
 // background work is not counted in it: its snapshot can be old.
 //
-// Both read the cards and the subagents from $.state while they draw, so a write to either draws
-// them again; nothing here calls $.ui.invalidate or draws on a timer (in the desktop app every
-// redraw rebuilds every mod's drawing, other mods' open panes included).
+// Nothing here calls $.ui.invalidate or draws on a timer (in the desktop app every redraw
+// rebuilds every mod's drawing, other mods' open panes included).
 
 import { fitBand, clockOf, orderedCards } from './board.js'
-import { viewOf, runningOf } from './agents.js'
-import { rowsOf, snapshotOf } from './background.js'
+import { viewOf } from './agents.js'
+import { rowsOf } from './background.js'
 import { mermaidSvg, splitFences } from './mermaid.js'
+import { getConfig, settingsLine, sizeText, stampOf } from './boards.js'
 
-// The state this file reads (declared in types/index.d.ts); unset until the cards are loaded
-const CARDS = { plugin: 'whiteboard', key: 'cards' }
-const AGENTS = { plugin: 'whiteboard', key: 'agents' }
-const BACKGROUND = { plugin: 'whiteboard', key: 'background' }
-
-const PANE_ID = 'whiteboard'
-const TITLE = 'ボード'
+export const PANE_ID = 'whiteboard'
+export const TITLE = 'ボード'
 
 // Element keys allow a plain set of characters; a card's id is checked to, but not trusted to
 const keyOf = (prefix, id) => prefix + '-' + String(id).replace(/[^A-Za-z0-9_-]/g, '_')
 
 // The cells across a drawing: the site's own width, else what the surface measured; null when
 // neither is known
-function widthOf(e) {
+export function widthOf(e) {
   const n = e.props?.bodyColumns
   if (typeof n === 'number' && n > 0) return n
   const v = e.viewport?.columns
   return typeof v === 'number' && v > 0 ? v : null
-}
-
-async function cardsOf($) {
-  const { value } = await $.state.get(CARDS)
-  return Array.isArray(value) ? value : []
-}
-
-async function agentsOf($) {
-  const { value } = await $.state.get(AGENTS)
-  return Array.isArray(value) ? value : []
-}
-
-async function backgroundOf($) {
-  const { value } = await $.state.get(BACKGROUND)
-  return snapshotOf(value)
-}
-
-// Opens the pane: /whiteboard and the band's button
-function openPane($) {
-  return $.ui.open({ id: PANE_ID, title: TITLE })
 }
 
 // A card's body. The Markdown element shows a mermaid fence as a code block, so on a surface with
@@ -204,44 +182,91 @@ function drawCards(ui, cards, view) {
   ]
 }
 
-function drawPane(ui, cards, agents, snapshot, view) {
-  const subagents = viewOf(agents)
-  const background = rowsOf(snapshot)
-  const section = subagents.running.length + subagents.done.length + background.rows.length > 0 ? [drawAgents(ui, subagents, background)] : []
-  return ui.Box({ key: 'whiteboard', flexDirection: 'column', rowGap: 1, paddingX: 1, width: '100%', children: [...section, ...drawCards(ui, cards, view)] })
+// The other sessions' boards: the newest few with [取り込む] and [消す], the store's size, the options.
+// Left out when there is none and no line about an action to show.
+function drawOthers(ui, others, ownChars, actions) {
+  const { Box, Text, Button } = ui
+  const rows = others.boards.map((b) => {
+    const id = b.sid8
+    return Box({
+      key: keyOf('other', id),
+      flexDirection: 'column',
+      children: [
+        Box({
+          key: keyOf('other-head', id),
+          flexDirection: 'row',
+          flexWrap: 'wrap',
+          columnGap: 2,
+          children: [
+            Text({ dimColor: true, children: [typeof b.updatedAt === 'number' ? stampOf(b.updatedAt) : '時刻不明'] }),
+            Text({ bold: true, wrap: 'wrap', children: [b.cwdName] }),
+            Text({ dimColor: true, children: [`${b.count} 枚`] }),
+          ],
+        }),
+        Box({ key: keyOf('other-titles', id), children: [Text({ dimColor: true, wrap: 'wrap', children: [b.titles.length > 0 ? b.titles.join(' / ') : '（カードなし）'] })] }),
+        Box({
+          key: keyOf('other-buttons', id),
+          flexDirection: 'row',
+          columnGap: 1,
+          children: [
+            Button({ key: 'import-' + id, label: '取り込む', variant: 'secondary', onPress: () => actions.importBoard(id) }),
+            Button({ key: 'drop-' + id, label: '消す', variant: 'secondary', onPress: () => actions.dropBoard(id) }),
+          ],
+        }),
+      ],
+    })
+  })
+  return Box({
+    key: 'others',
+    flexDirection: 'column',
+    rowGap: 1,
+    width: '100%',
+    borderStyle: 'round',
+    borderDimColor: true,
+    paddingX: 1,
+    children: [
+      Box({
+        key: 'others-head',
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        columnGap: 2,
+        children: [Text({ bold: true, children: ['ほかのセッションのボード'] }), Text({ dimColor: true, children: [sizeText(others.bytes + ownChars)] })],
+      }),
+      Box({ key: 'others-settings', children: [Text({ dimColor: true, wrap: 'wrap', children: [settingsLine(getConfig())] })] }),
+      ...(others.notice !== '' ? [Box({ key: 'others-notice', children: [Text({ wrap: 'wrap', children: [others.notice] })] })] : []),
+      ...rows,
+      ...(others.more > 0 ? [Box({ key: 'others-more', children: [Text({ dimColor: true, children: [`ほか ${others.more} 件`] })] })] : []),
+    ],
+  })
 }
 
-function drawBand($, ui, surface, columns, count, running) {
+/**
+ * The pane's tree. `data` is { cards, agents, snapshot, others } as register.js read them from
+ * $.state; `view` is { surface, columns }; `actions` the Buttons' work (importBoard, dropBoard).
+ */
+export function drawPane(ui, data, view, actions) {
+  const subagents = viewOf(data.agents)
+  const background = rowsOf(data.snapshot)
+  const section = subagents.running.length + subagents.done.length + background.rows.length > 0 ? [drawAgents(ui, subagents, background)] : []
+  const hasOthers = data.others.boards.length > 0 || data.others.notice !== ''
+  return ui.Box({
+    key: 'whiteboard',
+    flexDirection: 'column',
+    rowGap: 1,
+    paddingX: 1,
+    width: '100%',
+    children: [...section, ...drawCards(ui, data.cards, view), ...(hasOthers ? [drawOthers(ui, data.others, JSON.stringify(data.cards).length, actions)] : [])],
+  })
+}
+
+/** The band's tree; `onOpen` is what [開く] does. */
+export function drawBand(ui, surface, columns, count, running, onOpen) {
   const { Box, Text, Button } = ui
   const fit = fitBand({ surface, columns, count, running })
   const children = []
   if (fit.hasLabel) children.push(Box({ key: 'board-label', flexShrink: 0, children: [Text({ children: [fit.label] })] }))
   children.push(
-    Box({ key: 'board-open-slot', flexShrink: 0, children: [Button({ key: 'board-open', label: fit.buttonLabel, variant: 'secondary', onPress: () => openPane($) })] }),
+    Box({ key: 'board-open-slot', flexShrink: 0, children: [Button({ key: 'board-open', label: fit.buttonLabel, variant: 'secondary', onPress: onOpen })] }),
   )
   return Box({ key: 'whiteboard-band', flexDirection: 'row', flexWrap: 'nowrap', columnGap: 1, alignItems: 'center', children })
-}
-
-export function registerPane(on) {
-  // /whiteboard opens the pane (a helper: the band's button is the way in)
-  on('command.run', { command: 'whiteboard' }, async ($) => {
-    const opened = await openPane($)
-    return { text: opened?.isPlaced === false ? 'ボードを開きました（まだ表示されていません）' : 'ボードを開きました' }
-  })
-
-  on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
-    return drawPane($.ui.resolve(e), await cardsOf($), await agentsOf($), await backgroundOf($), { surface: e.surface, columns: widthOf(e) })
-  })
-
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const rest = await next(e)
-    if (e.props.hasSurvey) return rest
-    const cards = await cardsOf($)
-    const running = runningOf(await agentsOf($))
-    if (cards.length === 0 && running === 0) return rest
-    const ui = $.ui.resolve(e)
-    const mine = drawBand($, ui, e.surface, widthOf(e), cards.length, running)
-    if (!rest) return mine
-    return ui.Box({ flexDirection: 'column', children: [mine, rest] })
-  })
 }
