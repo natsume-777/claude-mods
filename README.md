@@ -11,6 +11,7 @@ Claude Code の mod 集です。
 | [ui-sampler](plugins/ui-sampler/README.md) | mod が描ける場所、呼べる API、受け取れる値を一通り試す見本。表示はすべて出どころの名前付き |
 | [cache-timer](plugins/cache-timer/README.md) | プロンプトキャッシュが切れるまでの残り時間を、フッターのモデル名の左に表示する |
 | [usage-ledger](plugins/usage-ledger/README.md) | このセッションのトークンが何に使われているかを表示し、新しいセッションにしたほうが安くなる時期を知らせる。集計はファイルに書き出して Claude と相談できる |
+| [whiteboard](plugins/whiteboard/README.md) | Claude が書き込む作業ボード。手順・並行処理・リンクなど、チャットで流れてしまう情報をカードにして残す |
 
 ## インストール
 

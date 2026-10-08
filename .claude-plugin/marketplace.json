@@ -24,6 +24,11 @@
       "name": "usage-ledger",
       "source": "./plugins/usage-ledger",
       "description": "Shows where the session's tokens go and when a fresh session would be cheaper"
+    },
+    {
+      "name": "whiteboard",
+      "source": "./plugins/whiteboard",
+      "description": "A whiteboard Claude writes to: titled Markdown cards (steps, running jobs, links) that stay put instead of scrolling away in the chat"
     }
   ]
 }
