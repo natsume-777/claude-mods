@@ -3,19 +3,5 @@
   "version": "0.5.0",
   "description": "A whiteboard Claude writes to: titled Markdown cards (steps, running jobs, links) that stay put instead of scrolling away in the chat",
   "author": { "name": "Natsume777" },
-  "types": "./types/index.d.ts",
-  "userConfig": {
-    "archiveDir": {
-      "type": "string",
-      "title": "消す前の書き出し先",
-      "description": "ほかのセッションのボードを消す前に、Markdown のファイルで書き出すフォルダ（プロジェクトからの相対パス。絶対パスも可）。空なら書き出さない",
-      "default": ""
-    },
-    "autoCleanDays": {
-      "type": "number",
-      "title": "古いボードの自動掃除（日数）",
-      "description": "1 以上なら、セッションの開始時に、更新から この日数より古い、ほかのセッションのボードを消す（書き出し先があれば、書き出してから）。0 ならしない。今のセッションのボードは消さない",
-      "default": 0
-    }
-  }
+  "types": "./types/index.d.ts"
 }

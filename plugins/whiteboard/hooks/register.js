@@ -44,6 +44,12 @@ const CARDS = { plugin: 'whiteboard', key: 'cards' }
 const BACKGROUND = { plugin: 'whiteboard', key: 'background' }
 const OTHERS = { plugin: 'whiteboard', key: 'others' }
 
+// The other sessions' boards (the list, import, delete, archive file, auto clean) are built but
+// switched off in this version: with false nothing reads the other boards, writes a meta, or
+// cleans, and the pane draws no list. To bring it back, set true and restore the `userConfig`
+// entries `archiveDir` (string, default "") and `autoCleanDays` (number, default 0) in plugin.json.
+const SHELF_ENABLED = false
+
 const TOOLS = {
   set_card: {
     description:
@@ -122,14 +128,18 @@ async function saveCards($, cards) {
   const key = storeKey(id)
   if (cards.length === 0) {
     await $.store.delete(key)
-    try {
-      await $.store.delete(metaKey(id))
-    } catch {}
+    if (SHELF_ENABLED) {
+      try {
+        await $.store.delete(metaKey(id))
+      } catch {}
+    }
   } else {
     await $.store.set(key, cards)
-    try {
-      await $.store.set(metaKey(id), metaValue(cards, cwdNameOf(await $.session.cwd()), await $.clock.now()))
-    } catch {}
+    if (SHELF_ENABLED) {
+      try {
+        await $.store.set(metaKey(id), metaValue(cards, cwdNameOf(await $.session.cwd()), await $.clock.now()))
+      } catch {}
+    }
   }
   await $.state.set(CARDS, cards)
 }
@@ -149,6 +159,7 @@ async function scanStore($) {
 // Reads the other boards from the store into $.state (`others`), with `notice` as the line the
 // list shows above itself ('' for none); written only if it differs from what is there
 function refreshOthers($, notice) {
+  if (!SHELF_ENABLED) return Promise.resolve()
   return exclusiveOthers(async () => {
     const next = othersOf(await scanStore($), notice)
     const { value } = await $.state.get(OTHERS)
@@ -158,6 +169,7 @@ function refreshOthers($, notice) {
 
 // The other boards as the state holds them
 async function readOthers($) {
+  if (!SHELF_ENABLED) return NO_OTHERS
   const { value } = await $.state.get(OTHERS)
   return value != null && typeof value === 'object' && Array.isArray(value.boards) ? value : NO_OTHERS
 }
@@ -241,6 +253,7 @@ async function dropBoard($, sid8) {
 // cannot be written stays). This session's board is never touched, nor one whose time is unknown.
 // A failure is a line in the debug log.
 async function autoClean($) {
+  if (!SHELF_ENABLED) return
   const days = getConfig().autoCleanDays
   if (days < 1) return
   const now = await $.clock.now()
