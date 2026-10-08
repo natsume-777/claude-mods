@@ -1,6 +1,6 @@
 {
   "name": "whiteboard",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "A whiteboard Claude writes to: titled Markdown cards (steps, running jobs, links) that stay put instead of scrolling away in the chat",
   "author": { "name": "Natsume777" },
   "types": "./types/index.d.ts"

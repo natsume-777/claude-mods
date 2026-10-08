@@ -1,23 +1,17 @@
 // What the pane and the band draw (pure: no $ here; register.js reads the state, hands the values
 // over with the actions the Buttons run, and registers the hooks).
 //
-// The pane starts with a section of its own, 並行処理, while any subagent is running or has just
-// finished, or background work (commands, monitors, workflows, crons) is in flight as of the last
-// Stop (left out otherwise): read only, kept apart from the cards. Then the cards, the pinned
-// ones first and each group in the order they were added: a title, a dim line with the id and the
-// time of the last write, and the body as Markdown (handed over as written, except that a mermaid
-// fence mermaid.js can draw is an Svg). The cards have no buttons: the person reads, Claude
-// writes. Last, while there are other sessions' boards, a list of them with [取り込む] and [消す].
-// The band is one short line, the card count and the running subagents' count with a button that
-// opens the pane, and is left out while there is neither a card nor a running subagent. The
-// background work is not counted in it: its snapshot can be old.
+// The pane holds the cards, the pinned ones first and each group in the order they were added: a
+// title, a dim line with the id and the time of the last write, and the body as Markdown (handed
+// over as written, except that a mermaid fence mermaid.js can draw is an Svg). The cards have no
+// buttons: the person reads, Claude writes. With none, a note says so. Last, while there are
+// other sessions' boards, a list of them with [取り込む] and [消す]. The band is one short line,
+// the card count with a button that opens the pane, drawn at 0 cards too.
 //
 // Nothing here calls $.ui.invalidate or draws on a timer (in the desktop app every redraw
 // rebuilds every mod's drawing, other mods' open panes included).
 
 import { fitBand, clockOf, orderedCards } from './board.js'
-import { viewOf } from './agents.js'
-import { rowsOf } from './background.js'
 import { mermaidSvg, splitFences } from './mermaid.js'
 import { getConfig, settingsLine, sizeText, stampOf } from './boards.js'
 
@@ -92,77 +86,6 @@ function drawCard(ui, card, view) {
   ]
   if (card.body.trim() !== '') children.push(drawBody(ui, card, view))
   return Box({ key: keyOf('card', card.id), flexDirection: 'column', width: '100%', borderStyle: 'round', borderDimColor: true, paddingX: 1, children })
-}
-
-// One subagent: its type, its description and its state in a row, and a finished one's summary under it
-function drawAgent(ui, agent) {
-  const { Box, Text } = ui
-  const isRunning = agent.status === 'running'
-  const dim = isRunning ? {} : { dimColor: true }
-  const row = Box({
-    key: keyOf('agent-row', agent.id),
-    flexDirection: 'row',
-    columnGap: 1,
-    children: [
-      Box({ flexShrink: 0, children: [Text({ bold: true, ...dim, children: [agent.type || 'agent'] })] }),
-      Box({ flexGrow: 1, flexShrink: 1, children: [Text({ wrap: 'wrap', ...dim, children: [agent.description || '（説明なし）'] })] }),
-      Box({ flexShrink: 0, children: [Text(isRunning ? { color: 'success', children: ['実行中'] } : { dimColor: true, children: ['完了'] })] }),
-    ],
-  })
-  const children = [row]
-  if (!isRunning && agent.summary) {
-    children.push(Box({ key: keyOf('agent-summary', agent.id), children: [Text({ dimColor: true, wrap: 'wrap', children: [agent.summary] })] }))
-  }
-  return Box({ key: keyOf('agent', agent.id), flexDirection: 'column', children })
-}
-
-// One piece of background work (a command, a monitor, a workflow, a cron): kind, text, state
-function drawBackgroundRow(ui, row) {
-  const { Box, Text } = ui
-  return Box({
-    key: keyOf('bg-row', row.key),
-    flexDirection: 'row',
-    columnGap: 1,
-    children: [
-      Box({ flexShrink: 0, children: [Text({ bold: true, dimColor: !row.isRunning, children: [row.kind] })] }),
-      Box({ flexGrow: 1, flexShrink: 1, children: [Text({ wrap: 'wrap', dimColor: !row.isRunning, children: [row.text || '（説明なし）'] })] }),
-      Box({ flexShrink: 0, children: [Text(row.isRunning ? { color: 'success', children: [row.state] } : { dimColor: true, children: [row.state] })] }),
-    ],
-  })
-}
-
-// The 並行処理 section: the running subagents, then the finished ones, newest first; then, as of
-// the last Stop, the background work (a snapshot: it is not kept up to date between the events)
-function drawAgents(ui, view, background) {
-  const { Box, Text } = ui
-  const hasAgents = view.running.length + view.done.length > 0
-  const children = [
-    Box({
-      key: 'agents-head',
-      flexDirection: 'row',
-      flexWrap: 'wrap',
-      columnGap: 2,
-      children: [
-        Text({ bold: true, children: ['並行処理'] }),
-        Text({ dimColor: true, children: [hasAgents ? `実行中 ${view.running.length} · 自動で更新されます` : 'バックグラウンドの作業'] }),
-      ],
-    }),
-    ...[...view.running, ...view.done].map((agent) => drawAgent(ui, agent)),
-  ]
-  if (background.rows.length > 0) {
-    children.push(
-      Box({
-        key: 'bg',
-        flexDirection: 'column',
-        children: [
-          Box({ key: 'bg-head', children: [Text({ dimColor: true, children: [background.at === null ? 'バックグラウンド · ターン終了時点' : `バックグラウンド · ターン終了時点 ${clockOf(background.at)}`] })] }),
-          ...background.rows.map((row) => drawBackgroundRow(ui, row)),
-          ...(background.more > 0 ? [Box({ key: 'bg-more', children: [Text({ dimColor: true, children: [`ほか ${background.more} 件`] })] })] : []),
-        ],
-      }),
-    )
-  }
-  return Box({ key: 'agents', flexDirection: 'column', width: '100%', borderStyle: 'round', borderDimColor: true, paddingX: 1, children })
 }
 
 // The cards' blocks: a note and a box each, or what to ask for while there are none
@@ -241,13 +164,10 @@ function drawOthers(ui, others, ownChars, actions) {
 }
 
 /**
- * The pane's tree. `data` is { cards, agents, snapshot, others } as register.js read them from
- * $.state; `view` is { surface, columns }; `actions` the Buttons' work (importBoard, dropBoard).
+ * The pane's tree. `data` is { cards, others } as register.js read them from $.state; `view` is
+ * { surface, columns }; `actions` the Buttons' work (importBoard, dropBoard).
  */
 export function drawPane(ui, data, view, actions) {
-  const subagents = viewOf(data.agents)
-  const background = rowsOf(data.snapshot)
-  const section = subagents.running.length + subagents.done.length + background.rows.length > 0 ? [drawAgents(ui, subagents, background)] : []
   const hasOthers = data.others.boards.length > 0 || data.others.notice !== ''
   return ui.Box({
     key: 'whiteboard',
@@ -255,14 +175,14 @@ export function drawPane(ui, data, view, actions) {
     rowGap: 1,
     paddingX: 1,
     width: '100%',
-    children: [...section, ...drawCards(ui, data.cards, view), ...(hasOthers ? [drawOthers(ui, data.others, JSON.stringify(data.cards).length, actions)] : [])],
+    children: [...drawCards(ui, data.cards, view), ...(hasOthers ? [drawOthers(ui, data.others, JSON.stringify(data.cards).length, actions)] : [])],
   })
 }
 
 /** The band's tree; `onOpen` is what [開く] does. */
-export function drawBand(ui, surface, columns, count, running, onOpen) {
+export function drawBand(ui, surface, columns, count, onOpen) {
   const { Box, Text, Button } = ui
-  const fit = fitBand({ surface, columns, count, running })
+  const fit = fitBand({ surface, columns, count })
   const children = []
   if (fit.hasLabel) children.push(Box({ key: 'board-label', flexShrink: 0, children: [Text({ children: [fit.label] })] }))
   children.push(

@@ -14,6 +14,9 @@ export const GONE = 'このボードは、もうありません'
 /** What the list says when a button's board is not in the list the state holds (the list is old). */
 export const OLD_LIST = 'この一覧は古くなっています。もう一度開き直してください'
 
+/** Whether two state values are the same (compared as JSON), so a write is made only when the list changed. */
+export const isSame = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+
 const sizeOf = (value) => (value === undefined ? 0 : JSON.stringify(value).length)
 
 /** Whether a key is one of the mod's own (a board or a meta). */
