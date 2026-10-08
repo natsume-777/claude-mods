@@ -1,20 +1,22 @@
 // The other sessions' boards as register.js finds them in $.store (pure: no $ here).
 //
 // register.js reads the store's keys and the values under the `board:` and `meta:` ones; this
-// turns them into what the pane's list holds (the `others` value of $.state), and words what the
-// list says after an action.
+// turns them into what the pane holds (the `others` value of $.state: the boards a new session
+// may take over, and the clean-up list), and words what the pane says after an action.
 
-import { sessionOfKey, summarizeBoard, shelfOf, metaKey, BOARD_PREFIX } from './boards.js'
+import { sessionOfKey, summarizeBoard, candidatesOf, cleanupOf, metaKey, BOARD_PREFIX } from './boards.js'
 
 /** The `others` value when nothing is known yet. */
-export const NO_OTHERS = { boards: [], more: 0, bytes: 0, notice: '' }
+export const NO_OTHERS = { boards: [], more: 0, cleanup: [], bytes: 0, notice: '' }
 
-/** What the list says when the board it was drawn from is not there any more. */
-export const GONE = 'このボードは、もうありません'
-/** What the list says when a button's board is not in the list the state holds (the list is old). */
+/** What the pane says when the board it was drawn from is not there any more. */
+export const GONE = 'このボードは、もうありません（消されたか、片付けられました）'
+/** What the pane says when a button's board is not in the list the state holds (the list is old). */
 export const OLD_LIST = 'この一覧は古くなっています。もう一度開き直してください'
+/** What the pane says when the board was taken over by another session in the meantime. */
+export const ALREADY = (sealed) => `このボードは、すでに別のセッション（${sealed.toCwdName} · ID ${sealed.toSid8}）に引き継がれています`
 
-/** Whether two state values are the same (compared as JSON), so a write is made only when the list changed. */
+/** Whether two state values are the same (compared as JSON), so a write is made only when the value changed. */
 export const isSame = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 
 const sizeOf = (value) => (value === undefined ? 0 : JSON.stringify(value).length)
@@ -44,10 +46,14 @@ export function scanEntries(me, keys, values) {
   return { entries, bytes }
 }
 
-/** The `others` value for a scan: the newest few boards, how many more there are, the size, and the line about the last action. */
-export function othersOf(scanned, notice = '') {
-  const { boards, more } = shelfOf(scanned.entries)
-  return { boards, more, bytes: scanned.bytes, notice }
+/**
+ * The `others` value for a scan: the boards that may be taken over (the first few, how many more
+ * there are), the clean-up list (only with `admin`), the size, and the line about the last action.
+ * `handover` false leaves the boards out.
+ */
+export function othersOf(scanned, { me, cwdName, notice = '', handover = true, admin = false } = {}) {
+  const { boards, more } = handover ? candidatesOf(scanned.entries, { me, cwdName }) : { boards: [], more: 0 }
+  return { boards, more, cleanup: admin ? cleanupOf(scanned.entries, { me }) : [], bytes: scanned.bytes, notice }
 }
 
 /** The line after [消す]. */

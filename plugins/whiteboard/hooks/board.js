@@ -237,19 +237,23 @@ export const countLabel = (count) => `ボード ${count}件`
 // The line's last columns, which the terminal may draw over
 const RESERVED_COLUMNS = 2
 
+/** The band's label with its hint: "ボード 0件 · 引き継げます" ("ボード 3件" with none). */
+export const bandLabel = (count, hint = '') => countLabel(count) + (hint !== '' ? ` · ${hint}` : '')
+
 /**
  * What the band draws in `columns`: { hasLabel, label, buttonLabel }. The wide form is the label
- * (the card count) and a [開く] button after it. When that does not fit, the button alone,
- * carrying the label. With no width known (0, absent), the wide form. The same at any count,
- * 0 included.
+ * (the card count, and the hint after it when there is one) and a [開く] button after it. When
+ * that does not fit, the button alone, carrying the count only (the hint is let go). With no
+ * width known (0, absent), the wide form. The same at any count, 0 included.
  */
-export function fitBand({ surface, columns, count }) {
-  const label = countLabel(count)
+export function fitBand({ surface, columns, count, hint = '' }) {
+  const label = bandLabel(count, hint)
   const wide = { hasLabel: true, label, buttonLabel: '開く' }
   if (!(typeof columns === 'number' && columns > 0)) return wide
   const room = columns - RESERVED_COLUMNS
   if (cells(label) + 1 + buttonCells(surface, wide.buttonLabel) <= room) return wide
-  return { hasLabel: false, label, buttonLabel: label }
+  const short = countLabel(count)
+  return { hasLabel: false, label: short, buttonLabel: short }
 }
 
 /** The local time of a card's last write, `14:05`. */

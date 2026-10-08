@@ -1,10 +1,10 @@
 // A whiteboard Claude writes to: titled Markdown cards (steps, running jobs, links) that stay put instead of scrolling away in the chat
 //
 // register.js  every hook and every $ call: the six tools Claude calls (set_card, edit_card, append_card, remove_card,
-//              clear, list_cards), the cards' load and save, the other sessions' boards (the list,
-//              [取り込む], [消す], the clean-up at the start), the pane and the band, /whiteboard
+//              clear, list_cards), the cards' load and save, the hand-over of another session's
+//              board (the list, [引き継ぐ], the seal), the pane and the band, /whiteboard
 // board.js     the limits, what each tool does to the cards and answers, the band's fit (pure)
-// boards.js    the other sessions' boards: the meta, the list, the import, the archive file (pure)
+// boards.js    the meta, the other sessions' boards, the hand-over's plan and words, the archive file (pure)
 // shelf.js     the store's keys turned into that list (pure)
 // store.js     the queue (pure)
 // mermaid.js   the mermaid fences drawn as pictures (pure)
@@ -14,16 +14,41 @@
 //
 // The cards live in $.state for the drawings to read (a write redraws them) and in $.store,
 // keyed by the session id (`board:<id>`, with `meta:<id>` beside it: when and in which folder it
-// was written), so they outlive the app: the same session opened again has them, and another
-// session's pane lists them to take over or delete. The store is written first; a write it
-// refuses (a store over its size limit) leaves the board as it was and the tool answers an error.
+// was written, what the session began with), so they outlive the app: the same session opened
+// again has them, and a new session's pane offers them for a hand-over. The store is written
+// first; a write it refuses (a store over its size limit) leaves the board as it was and the tool
+// answers an error.
+//
+// A hand-over copies the cards of another session's board into this one, then seals the other
+// board: `handedOver` in its meta. The cards under its `board:` key are never touched. A sealed
+// board is read-only: the tools that write answer a refusal (checked against the store at every
+// call), list_cards reads with a first line that says so, and the pane has a button that lifts
+// the seal. The seal holds whether or not the setting `handover` is on.
 //
 // The engine follows $ into the functions of the file it is in and no further, so everything
 // that takes $ is here.
 
 import { LIMITS, storeKey, sanitizeCards, applySet, applyEdit, applyAppend, applyRemove, applyClear, applyList } from './board.js'
-import { setConfig, getConfig, metaKey, metaValue, cwdNameOf, importCards, importText, archiveName, archivePath, archiveMarkdown, isStale } from './boards.js'
-import { NO_OTHERS, GONE, OLD_LIST, isMine, isSame, scanEntries, othersOf, droppedText, keptText } from './shelf.js'
+import {
+  setConfig,
+  getConfig,
+  metaKey,
+  readMeta,
+  mergeMeta,
+  cwdNameOf,
+  shortId,
+  promptLine,
+  planHandover,
+  cardsSig,
+  handoverText,
+  sealedDenyText,
+  sealedListLine,
+  archiveName,
+  archivePath,
+  archiveMarkdown,
+  isStale,
+} from './boards.js'
+import { NO_OTHERS, GONE, OLD_LIST, ALREADY, isMine, isSame, scanEntries, othersOf, droppedText, keptText } from './shelf.js'
 import { makeQueue } from './store.js'
 import { guideModeOf, keywordsOf, withGuide, makeGuideTurns } from './guide.js'
 import { PANE_ID, TITLE, widthOf, drawPane, drawBand } from './pane.js'
@@ -32,12 +57,18 @@ import { GRACE_MS, guardDrawing, beginPress, hasStarted, takeOver, endPress } fr
 // The state this file writes (declared in types/index.d.ts)
 const CARDS = { plugin: 'whiteboard', key: 'cards' }
 const OTHERS = { plugin: 'whiteboard', key: 'others' }
+const HANDOVER = { plugin: 'whiteboard', key: 'handover' }
+const VIEW = { plugin: 'whiteboard', key: 'view' }
 
-// The other sessions' boards (the list, import, delete, archive file, auto clean) are built but
-// switched off in this version: with false nothing reads the other boards, writes a meta, or
-// cleans, and the pane draws no list. To bring it back, set true and restore the `userConfig`
-// entries `archiveDir` (string, default "") and `autoCleanDays` (number, default 0) in plugin.json.
-const SHELF_ENABLED = false
+const NO_HANDOVER = { sealed: null, from: null, last: null }
+const NO_VIEW = { pick: '', shown: false, confirm: null }
+
+// Deleting other sessions' boards ([消す]), the file written before a delete (archiveDir) and the
+// automatic clean-up (autoCleanDays) are built but switched off in this version: with false none of
+// them runs and the pane draws no clean-up list. To bring them back, set true and restore the
+// `userConfig` entries `archiveDir` (string, default "") and `autoCleanDays` (number, default 0)
+// in plugin.json.
+const SHELF_ADMIN_ENABLED = false
 
 const TOOLS = {
   set_card: {
@@ -62,6 +93,7 @@ const TOOLS = {
       },
       required: ['id', 'title', 'body'],
     },
+    writes: true,
     apply: (cards, e, now) => applySet(cards, e, now),
   },
   edit_card: {
@@ -81,6 +113,7 @@ const TOOLS = {
       },
       required: ['id', 'find', 'replace'],
     },
+    writes: true,
     apply: (cards, e, now) => applyEdit(cards, e, now),
   },
   append_card: {
@@ -96,16 +129,19 @@ const TOOLS = {
       },
       required: ['id', 'text'],
     },
+    writes: true,
     apply: (cards, e, now) => applyAppend(cards, e, now),
   },
   remove_card: {
     description: 'ボードのカードを id で消す。済んだ手順、終わった処理、古くなった URL のカードは、残さず消す。id が無ければ、その旨を返す。',
     inputSchema: { type: 'object', properties: { id: { type: 'string', description: '消すカードの id' } }, required: ['id'] },
+    writes: true,
     apply: (cards, e) => applyRemove(cards, e),
   },
   clear: {
     description: 'ボードのカードを全部消す。人から「ボードを空にして」と頼まれたときや、作業が丸ごと終わったときに使う。1 枚だけ消すなら remove_card。',
     inputSchema: { type: 'object', properties: {} },
+    writes: true,
     apply: (cards) => applyClear(cards),
   },
   list_cards: {
@@ -124,14 +160,27 @@ const TOOLS = {
         query: { type: 'string', description: '検索語。空白で分けた語をすべて含むカードを返す（大文字小文字は区別しない、日本語は部分一致）' },
       },
     },
+    writes: false,
     apply: (cards, e) => applyList(cards, e),
   },
 }
 
-// The cards have a queue (the tools, an import, the start's load); the other sessions' list has
-// one of its own, so a tool never waits on it
+// The cards have a queue (the tools, a hand-over, the start's load); the other sessions' list has
+// one of its own, so a tool never waits on it; the small state values (`handover`, `view`) have a third
 const exclusive = makeQueue()
 const exclusiveOthers = makeQueue()
+const exclusiveState = makeQueue()
+
+const messageOf = (error) => String(error?.message ?? error)
+const isText = (s) => typeof s === 'string' && s !== ''
+
+// What this load has heard of each session (by id) to write into its meta at the next save: the
+// first request the person made and the latest title
+const noted = new Map()
+
+// The setting `handover` (on unless false) and what it turns on: reading the other boards
+const handoverOn = () => getConfig().handover
+const wantsOthers = () => handoverOn() || SHELF_ADMIN_ENABLED
 
 // The cards of this session: $.state when it holds them (kept over a hot reload), else the store's
 async function loadCards($) {
@@ -143,32 +192,122 @@ async function loadCards($) {
 }
 
 // Writes the cards to the store and then to $.state; the drawings read the state. The meta goes
-// with them (and is deleted with an empty board's key); a meta the store refuses is let go,
-// since the list copes with a board that has none.
-async function saveCards($, cards) {
+// with them, laid over the one there (and is deleted with an empty board's key, which also ends
+// the record of where the cards came from); `extra` adds to the meta. A meta the store refuses is
+// let go, since the list copes with a board that has none.
+async function saveCards($, cards, extra = {}) {
   const id = await $.session.id()
   const key = storeKey(id)
   if (cards.length === 0) {
     await $.store.delete(key)
-    if (SHELF_ENABLED) {
-      try {
-        await $.store.delete(metaKey(id))
-      } catch {}
-    }
+    try {
+      await $.store.delete(metaKey(id))
+    } catch {}
+    await patchHandover($, { from: null })
   } else {
     await $.store.set(key, cards)
-    if (SHELF_ENABLED) {
-      try {
-        await $.store.set(metaKey(id), metaValue(cards, cwdNameOf(await $.session.cwd()), await $.clock.now()))
-      } catch {}
-    }
+    try {
+      const prev = readMeta(await $.store.get(metaKey(id)))
+      const note = noted.get(id)
+      const patch = { updatedAt: await $.clock.now(), cwdName: cwdNameOf(await $.session.cwd()), count: cards.length, firstPrompt: note?.firstPrompt, title: note?.title, ...extra }
+      await $.store.set(metaKey(id), mergeMeta(prev, patch))
+    } catch {}
   }
   await $.state.set(CARDS, cards)
 }
 
-// ---- The other sessions' boards
+// ---- The small state values
 
-const messageOf = (error) => String(error?.message ?? error)
+const objectOr = (value, fallback) => (value != null && typeof value === 'object' && !Array.isArray(value) ? value : fallback)
+
+// The hand-over's state as $.state holds it; a value of an older shape is filled with the defaults
+async function readHandover($) {
+  const { value } = await $.state.get(HANDOVER)
+  const v = objectOr(value, {})
+  return { sealed: objectOr(v.sealed, null), from: objectOr(v.from, null), last: objectOr(v.last, null) }
+}
+
+async function readView($) {
+  const { value } = await $.state.get(VIEW)
+  const v = objectOr(value, {})
+  return { pick: typeof v.pick === 'string' ? v.pick : '', shown: v.shown === true, confirm: objectOr(v.confirm, null) }
+}
+
+// Writes a state value only when it differs from what is there (a write redraws the drawings).
+// The engine wants the reference spelled out at each call, so one function for each value.
+async function setHandover($, next) {
+  const { value } = await $.state.get(HANDOVER)
+  if (!isSame(value, next)) await $.state.set(HANDOVER, next)
+}
+async function setView($, next) {
+  const { value } = await $.state.get(VIEW)
+  if (!isSame(value, next)) await $.state.set(VIEW, next)
+}
+async function setOthers($, next) {
+  const { value } = await $.state.get(OTHERS)
+  if (!isSame(value, next)) await $.state.set(OTHERS, next)
+}
+
+// A change to one of the two small values
+function patchHandover($, patch) {
+  return exclusiveState(async () => setHandover($, { ...(await readHandover($)), ...patch }))
+}
+function patchView($, patch) {
+  return exclusiveState(async () => setView($, { ...(await readView($)), ...patch }))
+}
+
+// The cards as the state holds them
+async function cardsOf($) {
+  const { value } = await $.state.get(CARDS)
+  return Array.isArray(value) ? value : []
+}
+
+// The time, with the clock's own call; the system's if that fails (a drawing must not fail on it)
+async function nowOf($) {
+  try {
+    return await $.clock.now()
+  } catch {
+    return Date.now()
+  }
+}
+
+// ---- The seal
+
+// This session's own meta
+async function ownMeta($) {
+  return readMeta(await $.store.get(metaKey(await $.session.id())))
+}
+
+// The seal this session's board has in the store, or null (also when the store cannot be read)
+async function readSealed($) {
+  try {
+    return (await ownMeta($))?.handedOver ?? null
+  } catch {
+    return null
+  }
+}
+
+// Takes the seal and the record of where the cards came from from this session's meta into the
+// state. The record is kept while the meta has none (a meta the store refused).
+async function syncOwn($) {
+  const meta = await ownMeta($)
+  await patchHandover($, { sealed: meta?.handedOver ?? null, ...(meta?.handedFrom ? { from: meta.handedFrom } : {}) })
+}
+
+// [このセッションで書けるように戻す]: lifts the seal; the other session's cards stay
+async function unseal($) {
+  let text = '書けるように戻しました。このボードは、また引き継ぎの候補に出ます'
+  try {
+    const prev = await ownMeta($)
+    if (prev?.handedOver) await $.store.set(metaKey(await $.session.id()), mergeMeta(prev, { handedOver: null }))
+    await patchHandover($, { sealed: null })
+  } catch (error) {
+    text = `書けるように戻せませんでした: ${messageOf(error)}`
+  }
+  await patchHandover($, { last: { text } })
+}
+
+// ---- The other sessions' boards
 
 // Every other session's board in the store: { entries, bytes }
 async function scanStore($) {
@@ -179,27 +318,114 @@ async function scanStore($) {
 }
 
 // Reads the other boards from the store into $.state (`others`), with `notice` as the line the
-// list shows above itself ('' for none); written only if it differs from what is there
+// frame shows above the list ('' for none); written only if it differs from what is there
 function refreshOthers($, notice) {
-  if (!SHELF_ENABLED) return Promise.resolve()
+  if (!wantsOthers()) return Promise.resolve()
   return exclusiveOthers(async () => {
-    const next = othersOf(await scanStore($), notice)
-    const { value } = await $.state.get(OTHERS)
-    if (!isSame(value, next)) await $.state.set(OTHERS, next)
+    const options = { me: await $.session.id(), cwdName: cwdNameOf(await $.session.cwd()), notice, handover: handoverOn(), admin: SHELF_ADMIN_ENABLED }
+    const next = othersOf(await scanStore($), options)
+    await setOthers($, next)
   })
 }
 
-// The other boards as the state holds them
+// The other boards as the state holds them (a value of an older shape is filled with the defaults)
 async function readOthers($) {
-  if (!SHELF_ENABLED) return NO_OTHERS
+  if (!wantsOthers()) return NO_OTHERS
   const { value } = await $.state.get(OTHERS)
-  return value != null && typeof value === 'object' && Array.isArray(value.boards) ? value : NO_OTHERS
+  if (value == null || typeof value !== 'object' || !Array.isArray(value.boards)) return NO_OTHERS
+  // A row of an older shape (no title list) is left out rather than drawn wrong
+  return { ...NO_OTHERS, ...value, boards: value.boards.filter((b) => b != null && Array.isArray(b.allTitles)) }
 }
 
-// The board of the short id a button carries, as the list holds it
+// The board of the short id a button carries, as the lists hold it
 async function listed($, sid8) {
-  return (await readOthers($)).boards.find((b) => b.sid8 === sid8)
+  const others = await readOthers($)
+  return others.boards.find((b) => b.sid8 === sid8) ?? others.cleanup.find((b) => b.sid8 === sid8)
 }
+
+// ---- The hand-over
+
+// What the confirmation step keeps of a plan: the cards it names, not the cards themselves
+const slim = ({ added, duplicates, overflow }) => ({ added, duplicates, overflow })
+
+// Seals the board `row`: its meta gets `handedOver`, laid over the one there (made from the list's
+// row when the board has none, with the time it was last written, which stays as it was)
+async function sealSource($, row, handedOver, now) {
+  const prev = readMeta(await $.store.get(metaKey(row.sid))) ?? { updatedAt: row.updatedAt ?? now, cwdName: row.cwdName, count: row.count }
+  await $.store.set(metaKey(row.sid), mergeMeta(prev, { handedOver }))
+}
+
+// Copies the cards of the board `row` in after this session's, then seals it. With cards on this
+// board, a first call (`confirm` null) only stages the confirmation; the call that comes from
+// [この内容で引き継ぐ] carries the staged `confirm` and goes on if the boards are as they were,
+// else stages it again. Answers the line for the frame ('' when there is none).
+async function handOver($, row, confirm) {
+  const me = await $.session.id()
+  const source = sanitizeCards(await $.store.get(storeKey(row.sid)))
+  if (source.length === 0) return GONE
+  const before = readMeta(await $.store.get(metaKey(row.sid)))
+  if (before?.handedOver && before.handedOver.to !== me) return ALREADY(before.handedOver)
+  const now = await $.clock.now()
+  const cwdName = cwdNameOf(await $.session.cwd())
+  return exclusive(async () => {
+    const current = await loadCards($)
+    const plan = planHandover(current, source, LIMITS.cards)
+    const sig = cardsSig(current) + '|' + cardsSig(source)
+    const confirmed = confirm !== null && confirm.sig === sig
+    if ((current.length > 0 && !confirmed) || plan.added.length === 0) {
+      await patchView($, { confirm: { sid8: row.sid8, sig, plan: slim(plan), recounted: confirm !== null && !confirmed } })
+      return ''
+    }
+    // The copy first, then the seal: a seal without a copy is never left behind
+    const handedFrom = { sid: row.sid, sid8: row.sid8, cwdName: row.cwdName, updatedAt: row.updatedAt, count: row.count, at: now }
+    await saveCards($, plan.cards, { handedFrom })
+    let text = handoverText(plan, row, now)
+    try {
+      await sealSource($, row, { to: me, toSid8: shortId(me), toCwdName: cwdName, at: now }, now)
+      // Another session may have taken the same board over at the same moment
+      const after = readMeta(await $.store.get(metaKey(row.sid)))
+      if (after?.handedOver && after.handedOver.to !== me) {
+        text += `同じボードを、ほぼ同時に別のセッション（${after.handedOver.toCwdName} · ID ${after.handedOver.toSid8}）も引き継ぎました。どちらにも写しがあります`
+      }
+    } catch (error) {
+      text = `カードは写しましたが、元のボードを読み取り専用にできませんでした（${messageOf(error)}）。元のボードは、この一覧に残ります`
+    }
+    await patchView($, NO_VIEW)
+    await patchHandover($, { from: handedFrom, last: { text } })
+    return ''
+  })
+}
+
+// [引き継ぐ] and [この内容で引き継ぐ]: the board of `sid8` as the list holds it
+async function take($, sid8, confirm) {
+  let notice
+  try {
+    const row = await listed($, sid8)
+    notice = !row || row.sid === (await $.session.id()) ? OLD_LIST : await handOver($, row, confirm)
+  } catch (error) {
+    notice = `引き継げませんでした: ${messageOf(error)}`
+  }
+  await refreshOthers($, notice).catch(() => {})
+}
+
+async function takeConfirm($) {
+  const { confirm } = await readView($)
+  if (confirm !== null) await take($, confirm.sid8, confirm)
+}
+
+// [中身を見る] / [閉じる]: one board is open at a time
+async function peek($, sid8) {
+  const view = await readView($)
+  await patchView($, { pick: view.pick === sid8 ? '' : sid8, confirm: null })
+}
+
+// [表示] / [隠す] on a board that has cards
+async function toggleShown($) {
+  const view = await readView($)
+  await patchView($, { shown: !view.shown, pick: '', confirm: null })
+}
+
+// ---- The clean-up (switched off in this version, SHELF_ADMIN_ENABLED)
 
 // A board's file when archiveDir is set: { shown: the file's name } once written, { shown: '' }
 // when no folder is set, { shown, error } when it could not be written
@@ -227,29 +453,6 @@ async function removeBoard($, row, stored) {
   return written
 }
 
-// [取り込む]: copies the cards of another session's board into this one; the source stays
-async function importBoard($, sid8) {
-  let notice
-  try {
-    const row = await listed($, sid8)
-    if (!row || row.sid === (await $.session.id())) notice = OLD_LIST
-    else {
-      const stored = await $.store.get(storeKey(row.sid))
-      if (stored === undefined) notice = GONE
-      else {
-        notice = await exclusive(async () => {
-          const result = importCards(await loadCards($), sanitizeCards(stored), LIMITS.cards)
-          if (result.added > 0) await saveCards($, result.cards)
-          return importText(result)
-        })
-      }
-    }
-  } catch (error) {
-    notice = `取り込めませんでした: ${messageOf(error)}`
-  }
-  await refreshOthers($, notice).catch(() => {})
-}
-
 // [消す]: deletes another session's board, writing its file first when archiveDir is set
 async function dropBoard($, sid8) {
   let notice
@@ -275,7 +478,7 @@ async function dropBoard($, sid8) {
 // cannot be written stays). This session's board is never touched, nor one whose time is unknown.
 // A failure is a line in the debug log.
 async function autoClean($) {
-  if (!SHELF_ENABLED) return
+  if (!SHELF_ADMIN_ENABLED) return
   const days = getConfig().autoCleanDays
   if (days < 1) return
   const now = await $.clock.now()
@@ -293,29 +496,37 @@ async function autoClean($) {
   }
 }
 
-// ---- What the drawings read
+// ---- What the drawings read, and the entrances
 
-async function cardsOf($) {
-  const { value } = await $.state.get(CARDS)
-  return Array.isArray(value) ? value : []
-}
-
-// Opens the pane: /whiteboard and the band's button. The other sessions' boards are read again
-// first (and the line about the last action is let go), so the list is as the store has it now.
+// Opens the pane: /whiteboard and the band's button. The seal and the other sessions' boards are
+// read again first (and the line about the last action is let go, the pane's view starts afresh),
+// so the pane is as the store has it now.
 async function openPane($) {
   try {
+    await syncOwn($)
+  } catch {}
+  try {
     await refreshOthers($, '')
+  } catch {}
+  try {
+    await patchHandover($, { last: null })
+    await patchView($, NO_VIEW)
   } catch {}
   return $.ui.open({ id: PANE_ID, title: TITLE })
 }
 
+// What a tool call does. Every call looks at the seal in the store first: a write to a sealed
+// board is refused before it touches the cards, list_cards reads on and says the board is sealed.
 async function runTool($, tool, e) {
   try {
     const outcome = await exclusive(async () => {
+      const sealed = await readSealed($)
+      await patchHandover($, { sealed })
+      if (sealed && tool.writes) return { error: sealedDenyText(sealed) }
       const before = await loadCards($)
       const change = tool.apply(before, e, await $.clock.now())
       if (!change.error && change.cards !== before) await saveCards($, change.cards)
-      return change
+      return sealed && !change.error ? { ...change, text: sealedListLine(sealed) + '\n' + change.text } : change
     })
     return outcome.error ? { deny: outcome.error } : { result: outcome.text }
   } catch (error) {
@@ -323,8 +534,23 @@ async function runTool($, tool, e) {
   }
 }
 
+// The person's own words and the session's title, kept for the meta (the first request once)
+async function noteRequest($, e) {
+  try {
+    const id = await $.session.id()
+    const note = noted.get(id) ?? {}
+    if (isText(e.session_title)) note.title = promptLine(e.session_title)
+    if ((e.source === undefined || e.source === 'user') && note.firstPrompt === undefined) {
+      const line = promptLine(e.prompt)
+      if (line !== '') note.firstPrompt = line
+    }
+    noted.set(id, note)
+  } catch {}
+}
+
 export function register(on, options) {
   setConfig(options)
+  noted.clear()
   const guideMode = guideModeOf(options)
   // The turns' count lives in this load only (a hot reload starts it again)
   const guideTurns = makeGuideTurns(keywordsOf(options))
@@ -338,14 +564,20 @@ export function register(on, options) {
     try {
       await exclusive(() => loadCards($))
     } catch {}
-    // Old boards of other sessions (autoCleanDays), then the list of those that are left
+    // The seal and the record of where the cards came from, which the store keeps
+    try {
+      await syncOwn($)
+    } catch {}
+    // Old boards of other sessions (autoCleanDays, switched off in this version)
     try {
       await autoClean($)
     } catch (error) {
-      $.ui.log(`whiteboard: 古いボードの掃除に失敗しました: ${String(error?.message ?? error)}`, { to: 'debug' })
+      $.ui.log(`whiteboard: 古いボードの掃除に失敗しました: ${messageOf(error)}`, { to: 'debug' })
     }
+    // With the board empty, the boards that may be taken over, once (the band says so); with
+    // cards, they are read when the pane is opened (the clean-up list is read at the start too)
     try {
-      await refreshOthers($, '')
+      if (SHELF_ADMIN_ENABLED || (await cardsOf($)).length === 0) await refreshOthers($, '')
     } catch {}
     return next(e)
   })
@@ -362,10 +594,12 @@ export function register(on, options) {
   // (nothing of the cards in it), so the prompt cache is not spent. Off: nothing is added.
   on('prompt.compose', async ($, e, next) => withGuide(await next(e), e.traits, guideMode))
 
-  // full: when the person's message holds a keyword, the lines on which tool to use are handed to
-  // the model with it (additionalContext); the message itself is not changed. Not more than once
-  // in a few turns. Only the person's own messages count.
+  // The person's first request and the session's title are kept for the meta (the list tells
+  // boards apart by them). full: when the person's message holds a keyword, the lines on which
+  // tool to use are handed to the model with it (additionalContext); the message itself is not
+  // changed. Not more than once in a few turns. Only the person's own messages count.
   on('classic.UserPromptSubmit', async ($, e, next) => {
+    await noteRequest($, e)
     const result = await next(e)
     if (guideMode !== 'full' || (e.source !== undefined && e.source !== 'user')) return result
     const lines = guideTurns(e.prompt)
@@ -383,8 +617,24 @@ export function register(on, options) {
     // The Buttons' presses are guarded (press-guard.js): the first press on an unfocused pane can be lost
     const guard = guardDrawing(e.requestId)
     const ui = guard.wrap($.ui.resolve(e))
-    const data = { cards: await cardsOf($), others: await readOthers($) }
-    const actions = { importBoard: (id) => importBoard($, id), dropBoard: (id) => dropBoard($, id) }
+    const data = {
+      cards: await cardsOf($),
+      others: await readOthers($),
+      handover: await readHandover($),
+      view: await readView($),
+      enabled: handoverOn(),
+      admin: SHELF_ADMIN_ENABLED,
+      now: await nowOf($),
+    }
+    const actions = {
+      peek: (sid8) => peek($, sid8),
+      take: (sid8) => take($, sid8, null),
+      takeConfirm: () => takeConfirm($),
+      takeCancel: () => patchView($, { confirm: null }),
+      toggleShown: () => toggleShown($),
+      unseal: () => unseal($),
+      dropBoard: (sid8) => dropBoard($, sid8),
+    }
     return guard.done(drawPane(ui, data, { surface: e.surface, columns: widthOf(e) }, actions))
   })
 
@@ -392,8 +642,11 @@ export function register(on, options) {
     const rest = await next(e)
     if (e.props.hasSurvey) return rest
     const cards = await cardsOf($)
+    const sealed = (await readHandover($)).sealed !== null
+    const offered = !sealed && cards.length === 0 && handoverOn() && (await readOthers($)).boards.length > 0
+    const hint = sealed ? '読み取り専用' : offered ? '引き継げます' : ''
     const ui = $.ui.resolve(e)
-    const mine = drawBand(ui, e.surface, widthOf(e), cards.length, () => openPane($))
+    const mine = drawBand(ui, e.surface, widthOf(e), cards.length, hint, () => openPane($))
     if (!rest) return mine
     return ui.Box({ flexDirection: 'column', children: [mine, rest] })
   })
