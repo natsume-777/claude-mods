@@ -1,4 +1,4 @@
-// The board's rules, kept apart from the host calls: what a card is, the limits, how the four
+// The board's rules, kept apart from the host calls: what a card is, the limits, how the six
 // tools change a list of cards and what they answer, and how the band fits a narrow line.
 // Pure: no $ here, so register.js keeps every $ call itself.
 
@@ -85,6 +85,59 @@ export function applySet(cards, input, now) {
     return { cards: [...cards, card], text: `追加しました: ${id}（全 ${cards.length + 1} 件）${pinNote}` }
   }
   return { cards: cards.map((c, i) => (i === index ? card : c)), text: `上書きしました: ${id}（全 ${cards.length} 件）${pinNote}` }
+}
+
+/** The card's body with a new text, or the reason it cannot be: the body over the limit is refused with the excess. */
+function withBody(cards, index, body, now) {
+  if (body.length > LIMITS.body) {
+    return { error: `本文が上限の ${LIMITS.body} 文字を ${body.length - LIMITS.body} 文字超えます（${body.length} 文字になります）。要点に絞るか、カードを分けてください` }
+  }
+  // Title, pin and position stay; only the body and the time change
+  return { cards: cards.map((c, i) => (i === index ? { ...c, body, updatedAt: now } : c)) }
+}
+
+const noCardText = (id) => `${id} というカードはありません。set_card で作ってください`
+
+/**
+ * edit_card: replaces `find` in the card's body with `replace`. Like an editor's replace: it
+ * must match in exactly one place, unless `all` is true (every place). A `find` that is nowhere
+ * in the body, or in several places without `all`, is refused. `replace` may be empty (deletes).
+ */
+export function applyEdit(cards, input, now) {
+  const { id, error } = idOf(input)
+  if (error) return { error }
+  if (typeof input.find !== 'string' || input.find === '') return { error: 'find が空です。本文の中で置き換えたい文字列を指定してください' }
+  if (typeof input.replace !== 'string') return { error: 'replace は文字列で指定してください（空にすると find の部分を消します）' }
+  if (input.all !== undefined && typeof input.all !== 'boolean') return { error: 'all は true か false で指定してください' }
+  const index = cards.findIndex((c) => c.id === id)
+  if (index < 0) return { cards, text: noCardText(id) }
+  const parts = cards[index].body.split(input.find)
+  const found = parts.length - 1
+  if (found === 0) return { error: `${id} の本文に find が見つかりませんでした。list_cards の id で本文を読んで、一字一句合わせてください（改行も含めて）` }
+  if (found > 1 && input.all !== true) {
+    return { error: `find が ${id} の本文に ${found} 箇所あります。すべて置き換えるなら all: true、1 箇所だけなら前後も含めて一意になる find にしてください` }
+  }
+  const body = (input.all === true ? parts : [parts[0], parts.slice(1).join(input.find)]).join(input.replace)
+  const changed = withBody(cards, index, body, now)
+  if (changed.error) return changed
+  return { cards: changed.cards, text: `編集しました: ${id}（${input.all === true ? found : 1} 箇所）` }
+}
+
+/**
+ * append_card: adds `text` to the end of the card's body, on a line of its own (one newline
+ * between, none when the body is empty or already ends with one).
+ */
+export function applyAppend(cards, input, now) {
+  const { id, error } = idOf(input)
+  if (error) return { error }
+  if (typeof input.text !== 'string' || input.text === '') return { error: 'text が空です。足したい文を指定してください' }
+  const index = cards.findIndex((c) => c.id === id)
+  if (index < 0) return { cards, text: noCardText(id) }
+  const old = cards[index].body
+  const body = old + (old === '' || old.endsWith('\n') ? '' : '\n') + input.text
+  const changed = withBody(cards, index, body, now)
+  if (changed.error) return changed
+  return { cards: changed.cards, text: `追記しました: ${id}（本文 ${body.length} 文字）` }
 }
 
 /** remove_card: removes the card with this id; says so when there is none. */

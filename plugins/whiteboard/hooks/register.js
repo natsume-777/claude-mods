@@ -1,6 +1,6 @@
 // A whiteboard Claude writes to: titled Markdown cards (steps, running jobs, links) that stay put instead of scrolling away in the chat
 //
-// register.js  every hook and every $ call: the four tools Claude calls (set_card, remove_card,
+// register.js  every hook and every $ call: the six tools Claude calls (set_card, edit_card, append_card, remove_card,
 //              clear, list_cards), the cards' load and save, the other sessions' boards (the list,
 //              [取り込む], [消す], the clean-up at the start), the pane and the band, /whiteboard
 // board.js     the limits, what each tool does to the cards and answers, the band's fit (pure)
@@ -20,7 +20,7 @@
 // The engine follows $ into the functions of the file it is in and no further, so everything
 // that takes $ is here.
 
-import { LIMITS, storeKey, sanitizeCards, applySet, applyRemove, applyClear, applyList } from './board.js'
+import { LIMITS, storeKey, sanitizeCards, applySet, applyEdit, applyAppend, applyRemove, applyClear, applyList } from './board.js'
 import { setConfig, getConfig, metaKey, metaValue, cwdNameOf, importCards, importText, archiveName, archivePath, archiveMarkdown, isStale } from './boards.js'
 import { NO_OTHERS, GONE, OLD_LIST, isMine, isSame, scanEntries, othersOf, droppedText, keptText } from './shelf.js'
 import { makeQueue } from './store.js'
@@ -43,6 +43,7 @@ const TOOLS = {
       'ボード（人が画面の右のパネルで見る作業メモ）に、カードを追加するか上書きする。会話のログに埋もれて流れてしまう情報を残すために使う: ' +
       '進行中の手順やチェックリスト、並行して動かしている処理の状況、このセッションに関わる URL、決めたこと。' +
       '同じ id のカードは上書きされ（位置は変わらない）、状況が変わったら同じ id で更新する。1 カード 1 話題にして、本文は要点だけにする。' +
+      '本文の一部だけを変えるときは、全文を書き直さず edit_card（一部の置き換え）か append_card（末尾に足す）を使う。' +
       '用が済んだカードは remove_card で消す。会話にもう書いたことを、ただ写すためには使わない。' +
       'body は Markdown。```mermaid の基本的な flowchart / graph（と、参加者と矢印だけの sequenceDiagram）は図になる。それ以外の図（mermaid の別の種類、ASCII など）は、コードブロックとして読める形で表示される（描画はされない）。' +
       '関係や流れは、箇条書きや表でも伝わる。' +
@@ -60,6 +61,40 @@ const TOOLS = {
       required: ['id', 'title', 'body'],
     },
     apply: (cards, e, now) => applySet(cards, e, now),
+  },
+  edit_card: {
+    description:
+      'ボードのカードの本文の一部だけを書き換える。「手順の 1 項目を済みにする」「リンクの 1 つを直す」のように、数行しか変えないときに使う（全文を書き直すより軽い）。' +
+      'find（本文の中にある文字列。改行を含んでよい）を replace に置き換える。find は、本文の中にちょうど 1 箇所だけ一致する長さにする' +
+      '（0 箇所なら見つからなかった、2 箇所以上なら曖昧だとして断られる）。同じ文字列をすべて置き換えるなら all: true。replace を空にすると find の部分を消す。' +
+      'title、固定、カードの位置は変わらない。カードが無ければ set_card で作る。全体を書き直すときは set_card。' +
+      `置き換えたあとの本文が ${LIMITS.body} 文字を超える場合も断られる。`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '書き換えるカードの id' },
+        find: { type: 'string', description: '本文の中で置き換える文字列（空でない、改行を含んでよい）。1 箇所だけに一致する長さにする' },
+        replace: { type: 'string', description: '置き換える文字列。空にすると find の部分を消す' },
+        all: { type: 'boolean', description: 'true で、find に一致する箇所をすべて置き換える。省略すると、一致が 1 箇所のときだけ置き換える' },
+      },
+      required: ['id', 'find', 'replace'],
+    },
+    apply: (cards, e, now) => applyEdit(cards, e, now),
+  },
+  append_card: {
+    description:
+      'ボードのカードの本文の末尾に、文を足す。「URL を 1 つ足す」「経過を 1 行足す」のように、一部だけ変えるときに使う（全文を書き直すより軽い）。' +
+      '本文が空でなければ、間に改行を 1 つ入れて、新しい行として足す。title、固定、カードの位置は変わらない。' +
+      `カードが無ければ set_card で作る。全体を書き直すときは set_card。足したあとの本文が ${LIMITS.body} 文字を超える場合は断られる。`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '足すカードの id' },
+        text: { type: 'string', description: '本文の末尾に足す文（Markdown）' },
+      },
+      required: ['id', 'text'],
+    },
+    apply: (cards, e, now) => applyAppend(cards, e, now),
   },
   remove_card: {
     description: 'ボードのカードを id で消す。済んだ手順、終わった処理、古くなった URL のカードは、残さず消す。id が無ければ、その旨を返す。',
@@ -312,6 +347,8 @@ export function register(on, options) {
 
   // One hook per tool, the matcher written out so that validate can list it
   on('tool.call', { tool: 'mcp__whiteboard__set_card' }, ($, e) => runTool($, TOOLS.set_card, e))
+  on('tool.call', { tool: 'mcp__whiteboard__edit_card' }, ($, e) => runTool($, TOOLS.edit_card, e))
+  on('tool.call', { tool: 'mcp__whiteboard__append_card' }, ($, e) => runTool($, TOOLS.append_card, e))
   on('tool.call', { tool: 'mcp__whiteboard__remove_card' }, ($, e) => runTool($, TOOLS.remove_card, e))
   on('tool.call', { tool: 'mcp__whiteboard__clear' }, ($, e) => runTool($, TOOLS.clear, e))
   on('tool.call', { tool: 'mcp__whiteboard__list_cards' }, ($, e) => runTool($, TOOLS.list_cards, e))
