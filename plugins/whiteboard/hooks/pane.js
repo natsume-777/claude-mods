@@ -1,18 +1,22 @@
 // The pane the board opens in, /whiteboard, and the band above the prompt.
 //
-// The pane lists the cards in the order they were added: a title, a dim line with the id and the
-// time of the last write, and the body as Markdown (handed over as written, a ```mermaid fence
-// included). It has no buttons: the person reads, Claude writes. The band is one short line, the
-// card count and a button that opens the pane, and is left out while the board is empty.
+// The pane starts with a section of its own, 並行処理, while any subagent is running or has just
+// finished (left out otherwise): read only, kept apart from the cards. Then the cards in the
+// order they were added: a title, a dim line with the id and the time of the last write, and the
+// body as Markdown (handed over as written). It has no buttons: the person reads, Claude writes.
+// The band is one short line, the card count and the running subagents' count with a button that
+// opens the pane, and is left out while there is neither a card nor a running subagent.
 //
-// Both read the cards from $.state while they draw, so a write to it draws them again; nothing
-// here calls $.ui.invalidate or draws on a timer (in the desktop app every redraw rebuilds every
-// mod's drawing, other mods' open panes included).
+// Both read the cards and the subagents from $.state while they draw, so a write to either draws
+// them again; nothing here calls $.ui.invalidate or draws on a timer (in the desktop app every
+// redraw rebuilds every mod's drawing, other mods' open panes included).
 
-import { fitBand, countLabel, clockOf } from './board.js'
+import { fitBand, clockOf } from './board.js'
+import { viewOf, runningOf } from './agents.js'
 
-// The state this file reads (declared in types/index.d.ts); null until the cards are loaded
+// The state this file reads (declared in types/index.d.ts); unset until the cards are loaded
 const CARDS = { plugin: 'whiteboard', key: 'cards' }
+const AGENTS = { plugin: 'whiteboard', key: 'agents' }
 
 const PANE_ID = 'whiteboard'
 const TITLE = 'ボード'
@@ -31,6 +35,11 @@ function widthOf(e) {
 
 async function cardsOf($) {
   const { value } = await $.state.get(CARDS)
+  return Array.isArray(value) ? value : []
+}
+
+async function agentsOf($) {
+  const { value } = await $.state.get(AGENTS)
   return Array.isArray(value) ? value : []
 }
 
@@ -57,28 +66,82 @@ function drawCard(ui, card) {
   return Box({ key: keyOf('card', card.id), flexDirection: 'column', width: '100%', borderStyle: 'round', borderDimColor: true, paddingX: 1, children })
 }
 
-function drawPane(ui, cards) {
+// One subagent: its type, its description and its state in a row, and a finished one's summary under it
+function drawAgent(ui, agent) {
   const { Box, Text } = ui
-  const blocks =
-    cards.length === 0
-      ? [
-          Box({ key: 'empty', flexDirection: 'column', children: [
-            Text({ wrap: 'wrap', children: ['まだ何も書かれていません'] }),
-            Text({ dimColor: true, wrap: 'wrap', children: ['Claude に「ボードに手順を書いて」のように頼むと、ここにカードとして残ります'] }),
-          ] }),
-        ]
-      : [
-          Box({ key: 'about', children: [Text({ dimColor: true, wrap: 'wrap', children: [`${cards.length} 件 · 書き換えは Claude に頼んでください`] })] }),
-          ...cards.map((card) => drawCard(ui, card)),
-        ]
-  return Box({ key: 'whiteboard', flexDirection: 'column', rowGap: 1, paddingX: 1, width: '100%', children: blocks })
+  const isRunning = agent.status === 'running'
+  const dim = isRunning ? {} : { dimColor: true }
+  const row = Box({
+    key: keyOf('agent-row', agent.id),
+    flexDirection: 'row',
+    columnGap: 1,
+    children: [
+      Box({ flexShrink: 0, children: [Text({ bold: true, ...dim, children: [agent.type || 'agent'] })] }),
+      Box({ flexGrow: 1, flexShrink: 1, children: [Text({ wrap: 'wrap', ...dim, children: [agent.description || '（説明なし）'] })] }),
+      Box({ flexShrink: 0, children: [Text(isRunning ? { color: 'success', children: ['実行中'] } : { dimColor: true, children: ['完了'] })] }),
+    ],
+  })
+  const children = [row]
+  if (!isRunning && agent.summary) {
+    children.push(Box({ key: keyOf('agent-summary', agent.id), children: [Text({ dimColor: true, wrap: 'wrap', children: [agent.summary] })] }))
+  }
+  return Box({ key: keyOf('agent', agent.id), flexDirection: 'column', children })
 }
 
-function drawBand($, ui, surface, columns, count) {
+// The 並行処理 section: the running subagents, then the finished ones, newest first
+function drawAgents(ui, view) {
+  const { Box, Text } = ui
+  return Box({
+    key: 'agents',
+    flexDirection: 'column',
+    width: '100%',
+    borderStyle: 'round',
+    borderDimColor: true,
+    paddingX: 1,
+    children: [
+      Box({
+        key: 'agents-head',
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        columnGap: 2,
+        children: [
+          Text({ bold: true, children: ['並行処理'] }),
+          Text({ dimColor: true, children: [`実行中 ${view.running.length} · 自動で更新されます`] }),
+        ],
+      }),
+      ...[...view.running, ...view.done].map((agent) => drawAgent(ui, agent)),
+    ],
+  })
+}
+
+// The cards' blocks: a note and a box each, or what to ask for while there are none
+function drawCards(ui, cards) {
+  const { Box, Text } = ui
+  if (cards.length === 0) {
+    return [
+      Box({ key: 'empty', flexDirection: 'column', children: [
+        Text({ wrap: 'wrap', children: ['まだ何も書かれていません'] }),
+        Text({ dimColor: true, wrap: 'wrap', children: ['Claude に「ボードに手順を書いて」のように頼むと、ここにカードとして残ります'] }),
+      ] }),
+    ]
+  }
+  return [
+    Box({ key: 'about', children: [Text({ dimColor: true, wrap: 'wrap', children: [`${cards.length} 件 · 書き換えは Claude に頼んでください`] })] }),
+    ...cards.map((card) => drawCard(ui, card)),
+  ]
+}
+
+function drawPane(ui, cards, agents) {
+  const view = viewOf(agents)
+  const section = view.running.length + view.done.length > 0 ? [drawAgents(ui, view)] : []
+  return ui.Box({ key: 'whiteboard', flexDirection: 'column', rowGap: 1, paddingX: 1, width: '100%', children: [...section, ...drawCards(ui, cards)] })
+}
+
+function drawBand($, ui, surface, columns, count, running) {
   const { Box, Text, Button } = ui
-  const fit = fitBand({ surface, columns, count })
+  const fit = fitBand({ surface, columns, count, running })
   const children = []
-  if (fit.hasLabel) children.push(Box({ key: 'board-label', flexShrink: 0, children: [Text({ children: [countLabel(count)] })] }))
+  if (fit.hasLabel) children.push(Box({ key: 'board-label', flexShrink: 0, children: [Text({ children: [fit.label] })] }))
   children.push(
     Box({ key: 'board-open-slot', flexShrink: 0, children: [Button({ key: 'board-open', label: fit.buttonLabel, variant: 'secondary', onPress: () => openPane($) })] }),
   )
@@ -93,16 +156,17 @@ export function registerPane(on) {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
-    return drawPane($.ui.resolve(e), await cardsOf($))
+    return drawPane($.ui.resolve(e), await cardsOf($), await agentsOf($))
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const rest = await next(e)
     if (e.props.hasSurvey) return rest
     const cards = await cardsOf($)
-    if (cards.length === 0) return rest
+    const running = runningOf(await agentsOf($))
+    if (cards.length === 0 && running === 0) return rest
     const ui = $.ui.resolve(e)
-    const mine = drawBand($, ui, e.surface, widthOf(e), cards.length)
+    const mine = drawBand($, ui, e.surface, widthOf(e), cards.length, running)
     if (!rest) return mine
     return ui.Box({ flexDirection: 'column', children: [mine, rest] })
   })

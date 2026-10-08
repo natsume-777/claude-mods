@@ -1,20 +1,27 @@
 // A whiteboard Claude writes to: titled Markdown cards (steps, running jobs, links) that stay put instead of scrolling away in the chat
 //
 // register.js  the four tools Claude calls (set_card, remove_card, clear, list_cards), the
-//              cards' load and save, /whiteboard's registration
+//              cards' load and save, the subagents' start and stop, /whiteboard's registration
 // board.js     the limits, what each tool does to the cards and answers, the band's fit (pure)
+// agents.js    the list of subagents the pane shows above the cards (pure)
 // pane.js      the pane, /whiteboard, and the band above the prompt
 //
 // The cards live in $.state for the drawings to read (a write redraws them) and in $.store,
 // keyed by the session id, so they outlive the app: the same session opened again has them,
 // another session does not see them. The store is written first; a write it refuses (a store
 // over its size limit) leaves the board as it was and the tool answers an error.
+//
+// The subagents live in $.state alone, for the session only: they are not cards, no tool reads
+// or writes them, and nothing of them goes to the store. SubagentStart and SubagentStop write
+// them, and only when the list changes.
 
 import { LIMITS, storeKey, sanitizeCards, applySet, applyRemove, applyClear, applyList } from './board.js'
+import { AGENT_LIMITS, firstLine, infoOf, isShown, summaryOfMessages, attachSummary, withoutUnnamed, prune, startAgent, stopAgent, reconcile, isSame } from './agents.js'
 import { registerPane } from './pane.js'
 
 // The state this file writes (declared in types/index.d.ts)
 const CARDS = { plugin: 'whiteboard', key: 'cards' }
+const AGENTS = { plugin: 'whiteboard', key: 'agents' }
 
 const TOOLS = {
   set_card: {
@@ -23,7 +30,8 @@ const TOOLS = {
       '進行中の手順やチェックリスト、並行して動かしている処理の状況、このセッションに関わる URL、決めたこと。' +
       '同じ id のカードは上書きされ（位置は変わらない）、状況が変わったら同じ id で更新する。1 カード 1 話題にして、本文は要点だけにする。' +
       '用が済んだカードは remove_card で消す。会話にもう書いたことを、ただ写すためには使わない。' +
-      'body は Markdown（```mermaid のコードブロックも書いてよい）。' +
+      'body は Markdown。図は mermaid や ASCII のテキストで書くと、コードブロックとして読める形で表示される（描画はされない）。' +
+      '関係や流れは、箇条書きや表でも伝わる。' +
       `上限: ${LIMITS.cards} 枚、title ${LIMITS.title} 文字、body ${LIMITS.body} 文字、id は英数字と _ - の ${LIMITS.id} 文字まで。` +
       '会話の圧縮などで内容を思い出せないときは list_cards で読み返す。',
     inputSchema: {
@@ -54,16 +62,21 @@ const TOOLS = {
   },
 }
 
-// The calls run one at a time, so a read-change-write of the cards never overlaps another's
-let queue = Promise.resolve()
-function exclusive(fn) {
-  const run = queue.then(fn)
-  queue = run.then(
-    () => undefined,
-    () => undefined,
-  )
-  return run
+// Calls run one at a time in a queue, so a read-change-write never overlaps another's
+function makeQueue() {
+  let queue = Promise.resolve()
+  return (fn) => {
+    const run = queue.then(fn)
+    queue = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
 }
+const exclusive = makeQueue()
+// The subagents have a queue of their own, so a tool never waits on one
+const exclusiveAgents = makeQueue()
 
 // The cards of this session: $.state when it holds them (kept over a hot reload), else the store's
 async function loadCards($) {
@@ -80,6 +93,40 @@ async function saveCards($, cards) {
   if (cards.length === 0) await $.store.delete(key)
   else await $.store.set(key, cards)
   await $.state.set(CARDS, cards)
+}
+
+// The agents of this session as $.agent.list() names them now; [] when it cannot be read
+async function listAgents($) {
+  try {
+    const agents = await $.agent.list()
+    return Array.isArray(agents) ? agents : []
+  } catch {
+    return []
+  }
+}
+
+// The conversation of a subagent, or [] when the session cannot read it (a deny, a failure)
+async function readMessages($, agentId) {
+  try {
+    const found = await $.session.messages({ agentId })
+    return Array.isArray(found) ? found : []
+  } catch {
+    return []
+  }
+}
+
+// Changes the list of subagents with `change(list, known, now)` and writes it if it differs.
+// `known` is $.agent.list() (the description, and the end of an agent that raised no stop);
+// the agent of the event is left out of that reconcile.
+async function noteAgents($, exceptId, change) {
+  const known = await listAgents($)
+  const now = await $.clock.now()
+  await exclusiveAgents(async () => {
+    const { value } = await $.state.get(AGENTS)
+    const before = Array.isArray(value) ? value : []
+    const after = prune(reconcile(change(before, known, now), known, now, exceptId))
+    if (!isSame(before, after)) await $.state.set(AGENTS, after)
+  })
 }
 
 async function runTool($, tool, e) {
@@ -106,6 +153,16 @@ export function register(on) {
     try {
       await exclusive(() => loadCards($))
     } catch {}
+    // The subagents $.state kept over a hot reload: those with no type are an older version's
+    // leftovers (the app's own agents), dropped
+    try {
+      await exclusiveAgents(async () => {
+        const { value } = await $.state.get(AGENTS)
+        if (!Array.isArray(value)) return
+        const kept = withoutUnnamed(value)
+        if (kept.length !== value.length) await $.state.set(AGENTS, kept)
+      })
+    } catch {}
     return next(e)
   })
 
@@ -114,6 +171,34 @@ export function register(on) {
   on('tool.call', { tool: 'mcp__whiteboard__remove_card' }, ($, e) => runTool($, TOOLS.remove_card, e))
   on('tool.call', { tool: 'mcp__whiteboard__clear' }, ($, e) => runTool($, TOOLS.clear, e))
   on('tool.call', { tool: 'mcp__whiteboard__list_cards' }, ($, e) => runTool($, TOOLS.list_cards, e))
+
+  // A subagent starts: running. The description is $.agent.list()'s (the Agent call's own).
+  // The app's own agents (empty agent_type) are left out.
+  on('classic.SubagentStart', async ($, e, next) => {
+    if (isShown(e)) {
+      try {
+        await noteAgents($, e.agent_id, (list, known, now) => startAgent(list, infoOf(e, known), now))
+      } catch {}
+    }
+    return next(e)
+  })
+
+  // A subagent stops: done at once, then its summary is added if the record is still there. The
+  // summary is a line of, in this order: the report the agent handed back in a handback tool call
+  // (its input; it replaces a summary the record has), the text of its last message, the event's
+  // `last_assistant_message` (these two only while the record has none). A stop can come twice,
+  // the first with a remark made on the way, so the later report must be able to replace it.
+  on('classic.SubagentStop', async ($, e, next) => {
+    const result = await next(e)
+    if (!isShown(e)) return result
+    try {
+      await noteAgents($, e.agent_id, (list, known, now) => stopAgent(list, infoOf(e, known), now))
+      const found = summaryOfMessages(await readMessages($, e.agent_id))
+      const text = found.text || firstLine(e.last_assistant_message, AGENT_LIMITS.summary)
+      if (text !== '') await noteAgents($, e.agent_id, (list) => attachSummary(list, e.agent_id, text, found.isReport))
+    } catch {}
+    return result
+  })
 
   // The pane, /whiteboard and the band
   registerPane(on)

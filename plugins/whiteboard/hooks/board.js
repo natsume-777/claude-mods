@@ -113,23 +113,34 @@ export function cells(text) {
 /** The cells a Button takes: its label in brackets on a terminal, inside a frame elsewhere (an estimate). */
 export const buttonCells = (surface, label) => cells(label) + (surface === 'terminal' ? 2 : 4)
 
-/** The line's label, "ボード 3件". */
+/** The card count's part of the line's label, "ボード 3件". */
 export const countLabel = (count) => `ボード ${count}件`
+
+/** The running subagents' part of the line's label, "実行中 2". */
+export const runningLabel = (running) => `実行中 ${running}`
+
+/** The line's label: the card count and the running count, each left out at 0 ("ボード 3件 · 実行中 2"). */
+export const bandLabel = (count, running = 0) =>
+  [count > 0 ? countLabel(count) : '', running > 0 ? runningLabel(running) : ''].filter((s) => s !== '').join(' · ')
 
 // The line's last columns, which the terminal may draw over
 const RESERVED_COLUMNS = 2
 
 /**
- * What the band draws in `columns`: { hasLabel, buttonLabel }. The wide form is the label
- * "ボード N件" and a [開く] button after it; when that does not fit, the button alone, carrying
- * the label. With no width known (0, absent), the wide form.
+ * What the band draws in `columns`: { hasLabel, label, buttonLabel }. The wide form is the label
+ * (the card count and the running count) and a [開く] button after it. When that does not fit,
+ * the button alone, carrying the whole label; when even that does not fit, carrying the running
+ * count alone if there is one (it changes while the person looks), else the card count. With no
+ * width known (0, absent), the wide form.
  */
-export function fitBand({ surface, columns, count }) {
-  const label = countLabel(count)
-  const wide = { hasLabel: true, buttonLabel: '開く' }
+export function fitBand({ surface, columns, count, running = 0 }) {
+  const label = bandLabel(count, running)
+  const wide = { hasLabel: true, label, buttonLabel: '開く' }
   if (!(typeof columns === 'number' && columns > 0)) return wide
-  const needed = cells(label) + 1 + buttonCells(surface, wide.buttonLabel)
-  return needed <= columns - RESERVED_COLUMNS ? wide : { hasLabel: false, buttonLabel: label }
+  const room = columns - RESERVED_COLUMNS
+  if (cells(label) + 1 + buttonCells(surface, wide.buttonLabel) <= room) return wide
+  if (buttonCells(surface, label) <= room) return { hasLabel: false, label, buttonLabel: label }
+  return { hasLabel: false, label, buttonLabel: running > 0 ? runningLabel(running) : countLabel(count) }
 }
 
 /** The local time of a card's last write, `14:05`. */
