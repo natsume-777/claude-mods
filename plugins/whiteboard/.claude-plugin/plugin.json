@@ -1,7 +1,22 @@
 {
   "name": "whiteboard",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "A whiteboard Claude writes to: titled Markdown cards (steps, running jobs, links) that stay put instead of scrolling away in the chat",
   "author": { "name": "Natsume777" },
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "guide": {
+      "type": "string",
+      "title": "新しいセッションへの案内",
+      "description": "ボードがあることを Claude に知らせる量。off は何も足さない、short はシステムプロンプトに短い 1 節（毎回同じ文）、full は short に加えて、入力に下の語が含まれるときだけ使い分けの要点を足す",
+      "options": ["off", "short", "full"],
+      "default": "short"
+    },
+    "guideKeywords": {
+      "type": "string",
+      "title": "full のきっかけの語",
+      "description": "guide が full のとき、入力にこの語（カンマ区切り、大文字小文字は区別しない）のどれかが含まれると、ツールの使い分けの要点を足す（5 ターンに 1 回まで）",
+      "default": "ボード,whiteboard"
+    }
+  }
 }

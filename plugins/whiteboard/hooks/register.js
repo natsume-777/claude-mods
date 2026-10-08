@@ -9,6 +9,7 @@
 // store.js     the queue (pure)
 // mermaid.js   the mermaid fences drawn as pictures (pure)
 // pane.js      what the pane and the band draw (pure)
+// guide.js     the fixed text that tells a new session the board exists, and when to repeat the tool lines (pure)
 // press-guard.js  runs a pane press again that did not reach its Button (pure)
 //
 // The cards live in $.state for the drawings to read (a write redraws them) and in $.store,
@@ -24,6 +25,7 @@ import { LIMITS, storeKey, sanitizeCards, applySet, applyEdit, applyAppend, appl
 import { setConfig, getConfig, metaKey, metaValue, cwdNameOf, importCards, importText, archiveName, archivePath, archiveMarkdown, isStale } from './boards.js'
 import { NO_OTHERS, GONE, OLD_LIST, isMine, isSame, scanEntries, othersOf, droppedText, keptText } from './shelf.js'
 import { makeQueue } from './store.js'
+import { guideModeOf, keywordsOf, withGuide, makeGuideTurns } from './guide.js'
 import { PANE_ID, TITLE, widthOf, drawPane, drawBand } from './pane.js'
 import { GRACE_MS, guardDrawing, beginPress, hasStarted, takeOver, endPress } from './press-guard.js'
 
@@ -323,6 +325,9 @@ async function runTool($, tool, e) {
 
 export function register(on, options) {
   setConfig(options)
+  const guideMode = guideModeOf(options)
+  // The turns' count lives in this load only (a hot reload starts it again)
+  const guideTurns = makeGuideTurns(keywordsOf(options))
 
   // Fires on the session's start, and again after a hot reload
   on('session.start', async ($, e, next) => {
@@ -352,6 +357,21 @@ export function register(on, options) {
   on('tool.call', { tool: 'mcp__whiteboard__remove_card' }, ($, e) => runTool($, TOOLS.remove_card, e))
   on('tool.call', { tool: 'mcp__whiteboard__clear' }, ($, e) => runTool($, TOOLS.clear, e))
   on('tool.call', { tool: 'mcp__whiteboard__list_cards' }, ($, e) => runTool($, TOOLS.list_cards, e))
+
+  // The guide: one fixed section at the end of the system prompt, the same text on every call
+  // (nothing of the cards in it), so the prompt cache is not spent. Off: nothing is added.
+  on('prompt.compose', async ($, e, next) => withGuide(await next(e), e.traits, guideMode))
+
+  // full: when the person's message holds a keyword, the lines on which tool to use are handed to
+  // the model with it (additionalContext); the message itself is not changed. Not more than once
+  // in a few turns. Only the person's own messages count.
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    const result = await next(e)
+    if (guideMode !== 'full' || (e.source !== undefined && e.source !== 'user')) return result
+    const lines = guideTurns(e.prompt)
+    if (lines === '') return result
+    return { ...result, additionalContext: [...(result?.additionalContext ?? []), lines] }
+  })
 
   // /whiteboard opens the pane (a helper: the band's button is the way in)
   on('command.run', { command: 'whiteboard' }, async ($) => {
