@@ -16,7 +16,7 @@
       "title": "新しいセッションへの案内",
       "description": "ボードがあることを Claude に知らせる量。off は何も足さない、short はシステムプロンプトに短い 1 節（毎回同じ文）、full は short に加えて、入力に下の語が含まれるときだけ使い分けの要点を足す",
       "options": ["off", "short", "full"],
-      "default": "short"
+      "default": "off"
     },
     "guideKeywords": {
       "type": "string",
