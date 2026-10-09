@@ -2,17 +2,31 @@
 // On a narrow band the parts give way in a fixed order (fitBand): the clock first, then the
 // reset countdowns, then the bars shorten, then the bars go; the labels and percentages stay.
 // Every meter keeps its width (flexShrink 0), so none of them overlaps another or wraps.
-// The context figure is this session's own. The rate-limit figures are the account's, but each
-// session reads them only from its own last API response, so the newest reading any session
-// made is shared through $.store, and every session shows the newer of its own and the stored.
+// The context figure is this session's own. The rate-limit figures are the account's. Where the
+// desktop app's own usage card answers (its ccd_session_mgmt server's get_usage), the 5h and weekly
+// figures come from it, so the band shows what the app shows; elsewhere (the terminal) they come
+// from the session's last API response, which lags the card by a few minutes. The newest reading
+// any session made is shared through $.store, and every session shows the newer of its own and
+// the stored.
 // With the `log` option on, each reading a session publishes to the store is also appended to
 // a daily JSON Lines file under `logDir`, so the readings can be aggregated later.
 
 // This session's context, from $.session.usage() or session.measure; never shared
 let context = null
-// This session's own rate-limit reading, { rateLimits, measuredAt }: measuredAt is
-// $.clock.now() ms when the figures arrived here (the engine gives no response time)
-let own = null
+// This session's own rate-limit readings, { rateLimits, measuredAt, src }, one per source:
+// measuredAt is $.clock.now() ms when the figures arrived here (neither source gives a time of
+// its own), src is 'card' (the app's usage card) or 'response' (the last API response)
+let fromCard = null
+let fromResponse = null
+// Whether the last read of the card answered with figures; while it does, the card's reading is
+// this session's own and the response's is not used
+let cardOk = false
+// When the last read of the card started, for the throttle
+let cardAt = null
+// The read of the card in flight, which a second caller waits on instead of reading again
+let cardPending = null
+// A read of the card put off by the throttle, kept so a final session.end can stop it
+let cardLater = null
 // The reading drawn: own, or the stored one when that is newer
 let shown = null
 // Refreshes the countdowns; kept so a later session.start or session.end can stop it
@@ -34,6 +48,18 @@ const TICK_MS = 60_000
 const STORE_KEY = 'rateLimits'
 // Two resetsAt this close are the same window; the next window resets at least 5 hours later
 const SAME_WINDOW_MS = 3_600_000
+// Two resetsAt this close are the same figures: the card's carry milliseconds that may move
+// between reads
+const SAME_RESET_MS = 60_000
+
+// The desktop app's usage card, and the windows of it the band shows, by label
+const CARD = { server: 'ccd_session_mgmt', tool: 'get_usage' }
+// The same tool as the model calls it
+const CARD_TOOL = 'mcp__ccd_session_mgmt__get_usage'
+const CARD_KINDS = { '5-hour limit': 'five_hour', 'Weekly · all models': 'seven_day' }
+// The card is read at most once in this many milliseconds; a read asked for sooner runs when
+// they have passed
+const CARD_GAP_MS = 10_000
 
 const LABELS = { five_hour: '5h', seven_day: '7d', spend_limit: '$' }
 
@@ -70,6 +96,7 @@ export function register(on, options) {
   on('session.start', async ($, e, next) => {
     ticker?.cancel()
     await readUsage($)
+    await readCard($)
     await sync($)
     // Counts the resets down, polls this session's figures and picks up the stored ones
     ticker = $.clock.every(TICK_MS, () => void refresh($))
@@ -84,13 +111,18 @@ export function register(on, options) {
   })
 
   on('session.end', async ($, e, next) => {
-    if (FINAL_REASONS.includes(e.reason)) ticker?.cancel()
+    if (FINAL_REASONS.includes(e.reason)) {
+      ticker?.cancel()
+      cardLater?.cancel()
+      cardLater = null
+    }
     return next(e)
   })
 
   // session.measure reports a changed context only after the next turn, so read it now
   on('classic.SessionStart', { source: ['clear', 'resume', 'fork', 'compact'] }, async ($, e, next) => {
     await readUsage($)
+    await readCard($)
     await sync($)
     $.ui.invalidate('ui.render')
     return next(e)
@@ -99,10 +131,20 @@ export function register(on, options) {
   // Fires after each turn, and when a rate-limit window moves a whole point
   on('session.measure', async ($, e, next) => {
     context = e.context
-    takeRateLimits(e.rateLimits, await $.clock.now())
+    fromResponse = taken(fromResponse, e.rateLimits, await $.clock.now(), 'response')
+    // The response moved, so the account's usage did: the card has likely moved too
+    if (e.changed?.includes('rateLimits')) await readCard($)
     await sync($)
     $.ui.invalidate('ui.render')
     return next(e)
+  })
+
+  // The model asked the app for its usage: the band takes the same answer. The call itself is
+  // passed on and its result returned as is.
+  on('tool.call', { tool: CARD_TOOL }, async ($, e, next) => {
+    const answer = await next(e)
+    await takeCardAnswer($, answer)
+    return answer
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -143,7 +185,7 @@ export function register(on, options) {
 async function readUsage($) {
   const usage = await $.session.usage()
   context = usage.context
-  takeRateLimits(usage.rateLimits, await $.clock.now())
+  fromResponse = taken(fromResponse, usage.rateLimits, await $.clock.now(), 'response')
 }
 
 // Polls this session's figures, syncs with the store and redraws; a failed read keeps the last
@@ -152,23 +194,138 @@ async function refresh($) {
   try {
     await readUsage($)
   } catch {}
+  await readCard($)
   await sync($)
   $.ui.invalidate('ui.render')
 }
 
-// Takes this session's rate-limit figures as a new reading only when they differ from its last
-// one, so measuredAt says how old the figures are, not when they were last asked for
-function takeRateLimits(limits, now) {
-  if (!Array.isArray(limits) || limits.length === 0) return
-  if (own && JSON.stringify(limits) === JSON.stringify(own.rateLimits)) return
-  own = { rateLimits: limits, measuredAt: now }
+// Reads the app's usage card into fromCard, at most once per CARD_GAP_MS: a read asked for sooner
+// is put off until then (one at a time), and a caller during a read waits on that read. Never
+// throws; a card that does not answer with figures (no such server, as in the terminal, an
+// error, or a status other than ok) leaves cardOk false, so the response's figures are used.
+function readCard($) {
+  if (cardPending) return cardPending
+  cardPending = (async () => {
+    try {
+      const now = await $.clock.now()
+      if (cardAt != null && now - cardAt < CARD_GAP_MS) {
+        cardLater ??= $.clock.after(cardAt + CARD_GAP_MS - now, () => {
+          cardLater = null
+          void refreshCard($)
+        })
+        return
+      }
+      cardAt = now
+      const limits = await cardLimits($)
+      cardOk = limits != null
+      if (cardOk) fromCard = taken(fromCard, limits, await $.clock.now(), 'card')
+    } catch {
+      cardOk = false
+    }
+  })().finally(() => {
+    cardPending = null
+  })
+  return cardPending
+}
+
+// The read the throttle put off: reads the card, syncs and redraws
+async function refreshCard($) {
+  await readCard($)
+  await sync($)
+  $.ui.invalidate('ui.render')
+}
+
+// The model called the card's tool itself: takes what it answered as a read of the card, so the
+// band shows the figures Claude reports. Silent on anything it cannot use.
+async function takeCardAnswer($, answer) {
+  try {
+    if (!answer || answer.isError || answer.deny != null) return
+    const text = typeof answer.text === 'string' ? answer.text : firstText(answer.result?.content ?? answer.result)
+    const limits = cardLimitsOf(text)
+    if (!limits) return
+    const now = await $.clock.now()
+    cardAt = now
+    cardOk = true
+    fromCard = taken(fromCard, limits, now, 'card')
+    await sync($)
+    $.ui.invalidate('ui.render')
+  } catch {}
+}
+
+// The card's 5h and weekly windows as rate limits, read with $.mcp.call; null when the card
+// cannot be read or has neither window
+async function cardLimits($) {
+  let result
+  try {
+    result = await $.mcp.call(CARD.server, CARD.tool, {})
+  } catch {
+    return null
+  }
+  if (!result || result.isError) return null
+  return cardLimitsOf(firstText(result.content))
+}
+
+// The text of the first text block among MCP content blocks; undefined when there is none
+function firstText(blocks) {
+  if (!Array.isArray(blocks)) return undefined
+  return blocks.find((b) => b?.type === 'text' && typeof b.text === 'string')?.text
+}
+
+// The card's 5h and weekly windows from get_usage's text, percentUsed and resetsAt as given; null
+// when the text is not the card's JSON, its status is not ok, or it has neither window
+function cardLimitsOf(text) {
+  if (typeof text !== 'string') return null
+  let data
+  try {
+    data = JSON.parse(text)
+  } catch {
+    return null
+  }
+  const plan = data?.plan
+  if (plan?.status !== 'ok' || !Array.isArray(plan.windows)) return null
+  const limits = []
+  for (const w of plan.windows) {
+    const kind = Object.hasOwn(CARD_KINDS, w?.label) ? CARD_KINDS[w.label] : null
+    if (!kind || typeof w.percentUsed !== 'number' || limits.some((l) => l.kind === kind)) continue
+    const limit = { kind, percentUsed: w.percentUsed }
+    if (typeof w.resetsAt === 'string') limit.resetsAt = w.resetsAt
+    limits.push(limit)
+  }
+  return limits.length > 0 ? limits : null
+}
+
+// `limits` as a new reading from `src`, or `prev` when they are empty or the same figures, so
+// measuredAt says how old the figures are, not when they were last asked for
+function taken(prev, limits, now, src) {
+  if (!Array.isArray(limits) || limits.length === 0) return prev
+  if (prev && sameFigures(prev.rateLimits, limits)) return prev
+  return { rateLimits: limits, measuredAt: now, src }
+}
+
+// Whether two lists of windows say the same: the same kinds and percentages in the same order,
+// and resets within SAME_RESET_MS of each other
+function sameFigures(a, b) {
+  if (a.length !== b.length) return false
+  return a.every((x, i) => {
+    const y = b[i]
+    if (x.kind !== y.kind || x.percentUsed !== y.percentUsed) return false
+    if (x.resetsAt == null || y.resetsAt == null) return x.resetsAt == null && y.resetsAt == null
+    return Math.abs(Date.parse(x.resetsAt) - Date.parse(y.resetsAt)) < SAME_RESET_MS
+  })
+}
+
+// This session's own reading: the card's while the card answers, else the response's
+function ownReading() {
+  return cardOk && fromCard ? fromCard : fromResponse
 }
 
 // Publishes this session's reading when it is newer than the stored one, and shows the newer of
-// the two. Read, compare, write: two sessions syncing at once may both write, and the later
+// the two; while the card answers, shows the card's reading whatever is stored, since the band
+// is to match the app and a stored response reading may run ahead of the card. Read, compare, write: two sessions syncing at once may both write, and the later
 // write wins even if it is the older reading. That loses at most a moment's difference, and the
 // session holding the newer reading writes it again on its next sync (within a minute).
 async function sync($) {
+  const own = ownReading()
   let stored = null
   try {
     stored = asReading(await $.store.get(STORE_KEY))
@@ -184,7 +341,7 @@ async function sync($) {
       await logQueue
     }
   }
-  shown = newer(own, stored)
+  shown = cardOk && fromCard ? fromCard : newer(own, stored)
 }
 
 // register()'s options; a value of the wrong type keeps the default
@@ -205,7 +362,7 @@ async function appendLog($, reading) {
     const now = await $.clock.now()
     const dir = await logDirPath($)
     if (dir == null) {
-      warnLog($, 'usage-band: ホームフォルダが分からないため、使用率の記録を書けません。/config usage-band.logDir=<フォルダ> で記録の置き場を指定してください')
+      warnLog($, 'usage-band: ホームフォルダが分からないため、使用率の記録を書けません。usage-band の設定「記録の置き場」（logDir）にフォルダを指定してください')
       return
     }
     const path = dir + '/' + logFileName(now)
@@ -244,9 +401,10 @@ function logFileName(ms) {
   return 'usage-' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '.jsonl'
 }
 
-// One JSON object: ts (when written) and, per window kind, the raw percentage and reset time
+// One JSON object: ts (when written), src (where the figures came from: 'card' or 'response')
+// and, per window kind, the raw percentage and reset time
 function logLine(reading, now) {
-  const line = { ts: new Date(now).toISOString() }
+  const line = { ts: new Date(now).toISOString(), src: reading.src ?? 'response' }
   for (const limit of reading.rateLimits) {
     line[limit.kind] = { used: limit.percentUsed, resets_at: limit.resetsAt ?? null }
   }
