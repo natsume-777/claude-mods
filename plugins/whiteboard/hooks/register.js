@@ -19,11 +19,21 @@
 // first; a write it refuses (a store over its size limit) leaves the board as it was and the tool
 // answers an error.
 //
+// The rule for the cards: the store is the truth and $.state is a copy for the drawings. What is
+// read to be written over (the tools, a hand-over) is read from the store, inside `exclusive`. It
+// is never read from $.state: one dispatch (a tool call, a press) reads $.state as it stood at its
+// first read and keeps that, so a press that read $.state and then waited its turn in `exclusive`
+// would write over what a tool wrote meanwhile. For the same reason a press does not read $.state
+// for the cards before it enters `exclusive`. The state's `owner` says whose cards `cards` holds
+// (after /clear the process goes on under another session id), and the drawings do not take cards
+// of another owner.
+//
 // A hand-over copies the cards of another session's board into this one, then seals the other
-// board: `handedOver` in its meta. The cards under its `board:` key are never touched. A sealed
-// board is read-only: the tools that write answer a refusal (checked against the store at every
-// call), list_cards reads with a first line that says so, and the pane has a button that lifts
-// the seal. The seal holds whether or not the setting `handover` is on.
+// board: a value under `seal:<its id>`. The cards under its `board:` key are never touched. A
+// sealed board is read-only: the tools that write answer a refusal (checked against the store at
+// every call; a seal that cannot be read refuses too), list_cards reads with a first line that
+// says so, and the pane has a button that lifts the seal. The seal holds whether or not the
+// setting `handover` is on.
 //
 // The engine follows $ into the functions of the file it is in and no further, so everything
 // that takes $ is here.
@@ -33,7 +43,9 @@ import {
   setConfig,
   getConfig,
   metaKey,
+  sealKey,
   readMeta,
+  readSeal,
   mergeMeta,
   cwdNameOf,
   shortId,
@@ -42,6 +54,8 @@ import {
   cardsSig,
   handoverText,
   sealedDenyText,
+  sealUnreadableText,
+  SELF_SEALED,
   sealedListLine,
   archiveName,
   archivePath,
@@ -56,6 +70,7 @@ import { GRACE_MS, guardDrawing, beginPress, hasStarted, takeOver, endPress } fr
 
 // The state this file writes (declared in types/index.d.ts)
 const CARDS = { plugin: 'whiteboard', key: 'cards' }
+const OWNER = { plugin: 'whiteboard', key: 'owner' }
 const OTHERS = { plugin: 'whiteboard', key: 'others' }
 const HANDOVER = { plugin: 'whiteboard', key: 'handover' }
 const VIEW = { plugin: 'whiteboard', key: 'view' }
@@ -182,19 +197,26 @@ const noted = new Map()
 const handoverOn = () => getConfig().handover
 const wantsOthers = () => handoverOn() || SHELF_ADMIN_ENABLED
 
-// The cards of this session: $.state when it holds them (kept over a hot reload), else the store's
+// The cards of the session `id` as the store has them: the truth (see the top of this file)
+async function storedCards($, id) {
+  return sanitizeCards(await $.store.get(storeKey(id)))
+}
+
+// The cards of this session, from the store; $.state is brought in line when it differs (cards or
+// owner), for the drawings. Call it inside `exclusive`, not from a press before it waits there.
 async function loadCards($) {
-  const { value } = await $.state.get(CARDS)
-  if (Array.isArray(value)) return value
-  const cards = sanitizeCards(await $.store.get(storeKey(await $.session.id())))
-  await $.state.set(CARDS, cards)
+  const id = await $.session.id()
+  const cards = await storedCards($, id)
+  if (!isSame((await $.state.get(CARDS)).value, cards)) await $.state.set(CARDS, cards)
+  if ((await $.state.get(OWNER)).value !== id) await $.state.set(OWNER, id)
   return cards
 }
 
 // Writes the cards to the store and then to $.state; the drawings read the state. The meta goes
 // with them, laid over the one there (and is deleted with an empty board's key, which also ends
 // the record of where the cards came from); `extra` adds to the meta. A meta the store refuses is
-// let go, since the list copes with a board that has none.
+// let go, since the list copes with a board that has none. The seal is not part of the meta and is
+// never touched here.
 async function saveCards($, cards, extra = {}) {
   const id = await $.session.id()
   const key = storeKey(id)
@@ -214,6 +236,7 @@ async function saveCards($, cards, extra = {}) {
     } catch {}
   }
   await $.state.set(CARDS, cards)
+  await $.state.set(OWNER, id)
 }
 
 // ---- The small state values
@@ -256,10 +279,18 @@ function patchView($, patch) {
   return exclusiveState(async () => setView($, { ...(await readView($)), ...patch }))
 }
 
-// The cards as the state holds them
+// The cards for a drawing: the state's, when it holds this session's. Cards of another owner (the
+// process went on under a new session id after /clear) are not drawn: the store's are read instead
+// (a drawing may read the store, but may not write the state).
 async function cardsOf($) {
   const { value } = await $.state.get(CARDS)
-  return Array.isArray(value) ? value : []
+  const id = await $.session.id()
+  if (Array.isArray(value) && (await $.state.get(OWNER)).value === id) return value
+  try {
+    return await storedCards($, id)
+  } catch {
+    return []
+  }
 }
 
 // The time, with the clock's own call; the system's if that fails (a drawing must not fail on it)
@@ -273,38 +304,39 @@ async function nowOf($) {
 
 // ---- The seal
 
-// This session's own meta
-async function ownMeta($) {
-  return readMeta(await $.store.get(metaKey(await $.session.id())))
+// The seal of the board of the session `sid` (the `seal:` value, else a 0.9.0 meta's `handedOver`)
+// and its meta: { sealed, meta }. It throws when the store cannot be read: no caller takes that
+// for "not sealed".
+async function readSealState($, sid) {
+  const seal = readSeal(await $.store.get(sealKey(sid)))
+  const meta = readMeta(await $.store.get(metaKey(sid)))
+  return { sealed: seal ?? meta?.handedOver ?? null, meta }
 }
 
-// The seal this session's board has in the store, or null (also when the store cannot be read)
-async function readSealed($) {
-  try {
-    return (await ownMeta($))?.handedOver ?? null
-  } catch {
-    return null
-  }
-}
-
-// Takes the seal and the record of where the cards came from from this session's meta into the
+// Takes the seal and the record of where the cards came from from this session's store into the
 // state. The record is kept while the meta has none (a meta the store refused).
 async function syncOwn($) {
-  const meta = await ownMeta($)
-  await patchHandover($, { sealed: meta?.handedOver ?? null, ...(meta?.handedFrom ? { from: meta.handedFrom } : {}) })
+  const { sealed, meta } = await readSealState($, await $.session.id())
+  await patchHandover($, { sealed, ...(meta?.handedFrom ? { from: meta.handedFrom } : {}) })
 }
 
-// [このセッションで書けるように戻す]: lifts the seal; the other session's cards stay
-async function unseal($) {
-  let text = '書けるように戻しました。このボードは、また引き継ぎの候補に出ます'
-  try {
-    const prev = await ownMeta($)
-    if (prev?.handedOver) await $.store.set(metaKey(await $.session.id()), mergeMeta(prev, { handedOver: null }))
-    await patchHandover($, { sealed: null })
-  } catch (error) {
-    text = `書けるように戻せませんでした: ${messageOf(error)}`
-  }
-  await patchHandover($, { last: { text } })
+// [このセッションで書けるように戻す]: lifts the seal; the other session's cards stay. In the cards'
+// queue, so that no tool call is half-way through while it goes.
+function unseal($) {
+  return exclusive(async () => {
+    let patch
+    try {
+      const id = await $.session.id()
+      const { meta } = await readSealState($, id)
+      await $.store.delete(sealKey(id))
+      // A 0.9.0 seal sits in the meta
+      if (meta?.handedOver) await $.store.set(metaKey(id), mergeMeta(meta, { handedOver: null }))
+      patch = { sealed: null, last: { text: '書けるように戻しました。このボードは、また引き継ぎの候補に出ます' } }
+    } catch (error) {
+      patch = { last: { text: `書けるように戻せませんでした: ${messageOf(error)}` } }
+    }
+    await patchHandover($, patch)
+  })
 }
 
 // ---- The other sessions' boards
@@ -348,32 +380,35 @@ async function listed($, sid8) {
 // What the confirmation step keeps of a plan: the cards it names, not the cards themselves
 const slim = ({ added, duplicates, overflow }) => ({ added, duplicates, overflow })
 
-// Seals the board `row`: its meta gets `handedOver`, laid over the one there (made from the list's
-// row when the board has none, with the time it was last written, which stays as it was)
-async function sealSource($, row, handedOver, now) {
-  const prev = readMeta(await $.store.get(metaKey(row.sid))) ?? { updatedAt: row.updatedAt ?? now, cwdName: row.cwdName, count: row.count }
-  await $.store.set(metaKey(row.sid), mergeMeta(prev, { handedOver }))
-}
-
-// Copies the cards of the board `row` in after this session's, then seals it. With cards on this
-// board, a first call (`confirm` null) only stages the confirmation; the call that comes from
-// [この内容で引き継ぐ] carries the staged `confirm` and goes on if the boards are as they were,
-// else stages it again. Answers the line for the frame ('' when there is none).
+// Copies the cards of the board `row` in after this session's, then seals it (the `seal:` key of
+// the source; its cards and meta are not touched). With cards on this board, a first call
+// (`confirm` null) only stages the confirmation; the call that comes from [この内容で引き継ぐ]
+// carries the staged `confirm` and goes on if the boards are as they were, else stages it again.
+// This session's own seal and cards are read inside `exclusive`, from the store. Answers the line
+// for the frame ('' when there is none).
 async function handOver($, row, confirm) {
   const me = await $.session.id()
   const source = sanitizeCards(await $.store.get(storeKey(row.sid)))
   if (source.length === 0) return GONE
-  const before = readMeta(await $.store.get(metaKey(row.sid)))
-  if (before?.handedOver && before.handedOver.to !== me) return ALREADY(before.handedOver)
+  const taken = (await readSealState($, row.sid)).sealed
+  if (taken && taken.to !== me) return ALREADY(taken)
   const now = await $.clock.now()
   const cwdName = cwdNameOf(await $.session.cwd())
   return exclusive(async () => {
-    const current = await loadCards($)
+    // This board may have been sealed since the pane last looked: nothing is written to it then
+    const own = (await readSealState($, me)).sealed
+    if (own) {
+      await patchHandover($, { sealed: own, last: { text: SELF_SEALED } })
+      await patchView($, { confirm: null })
+      return SELF_SEALED
+    }
+    const current = await storedCards($, me)
     const plan = planHandover(current, source, LIMITS.cards)
     const sig = cardsSig(current) + '|' + cardsSig(source)
     const confirmed = confirm !== null && confirm.sig === sig
     if ((current.length > 0 && !confirmed) || plan.added.length === 0) {
-      await patchView($, { confirm: { sid8: row.sid8, sig, plan: slim(plan), recounted: confirm !== null && !confirmed } })
+      // shown: the step is seen even when the board had no cards at the press and got one since
+      await patchView($, { shown: true, confirm: { sid8: row.sid8, sig, plan: slim(plan), recounted: confirm !== null && !confirmed } })
       return ''
     }
     // The copy first, then the seal: a seal without a copy is never left behind
@@ -381,11 +416,11 @@ async function handOver($, row, confirm) {
     await saveCards($, plan.cards, { handedFrom })
     let text = handoverText(plan, row, now)
     try {
-      await sealSource($, row, { to: me, toSid8: shortId(me), toCwdName: cwdName, at: now }, now)
+      await $.store.set(sealKey(row.sid), { to: me, toSid8: shortId(me), toCwdName: cwdName, at: now })
       // Another session may have taken the same board over at the same moment
-      const after = readMeta(await $.store.get(metaKey(row.sid)))
-      if (after?.handedOver && after.handedOver.to !== me) {
-        text += `同じボードを、ほぼ同時に別のセッション（${after.handedOver.toCwdName} · ID ${after.handedOver.toSid8}）も引き継ぎました。どちらにも写しがあります`
+      const after = (await readSealState($, row.sid)).sealed
+      if (after && after.to !== me) {
+        text += `同じボードを、ほぼ同時に別のセッション（${after.toCwdName} · ID ${after.toSid8}）も引き継ぎました。どちらにも写しがあります`
       }
     } catch (error) {
       text = `カードは写しましたが、元のボードを読み取り専用にできませんでした（${messageOf(error)}）。元のボードは、この一覧に残ります`
@@ -449,6 +484,7 @@ async function removeBoard($, row, stored) {
   await $.store.delete(storeKey(row.sid))
   try {
     await $.store.delete(metaKey(row.sid))
+    await $.store.delete(sealKey(row.sid))
   } catch {}
   return written
 }
@@ -517,11 +553,19 @@ async function openPane($) {
 
 // What a tool call does. Every call looks at the seal in the store first: a write to a sealed
 // board is refused before it touches the cards, list_cards reads on and says the board is sealed.
+// A seal that cannot be read is not "no seal": a write is refused then (list_cards reads on).
 async function runTool($, tool, e) {
   try {
     const outcome = await exclusive(async () => {
-      const sealed = await readSealed($)
-      await patchHandover($, { sealed })
+      let sealed = null
+      let isKnown = true
+      try {
+        sealed = (await readSealState($, await $.session.id())).sealed
+      } catch (error) {
+        if (tool.writes) return { error: sealUnreadableText(messageOf(error)) }
+        isKnown = false
+      }
+      if (isKnown) await patchHandover($, { sealed })
       if (sealed && tool.writes) return { error: sealedDenyText(sealed) }
       const before = await loadCards($)
       const change = tool.apply(before, e, await $.clock.now())
@@ -530,12 +574,14 @@ async function runTool($, tool, e) {
     })
     return outcome.error ? { deny: outcome.error } : { result: outcome.text }
   } catch (error) {
-    return { deny: `ボードを保存できませんでした: ${String(error?.message ?? error)}` }
+    return { deny: `${tool.writes ? 'ボードを保存できませんでした' : 'ボードを読めませんでした'}: ${messageOf(error)}` }
   }
 }
 
-// The person's own words and the session's title, kept for the meta (the first request once)
+// The person's own words and the session's title, kept for the meta (the first request once).
+// Nothing is kept while the setting `handover` is off: they are for the list of boards to take over.
 async function noteRequest($, e) {
+  if (!handoverOn()) return
   try {
     const id = await $.session.id()
     const note = noted.get(id) ?? {}

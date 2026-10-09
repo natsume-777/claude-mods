@@ -1,10 +1,10 @@
 // The other sessions' boards as register.js finds them in $.store (pure: no $ here).
 //
-// register.js reads the store's keys and the values under the `board:` and `meta:` ones; this
+// register.js reads the store's keys and the values under the `board:`, `meta:` and `seal:` ones; this
 // turns them into what the pane holds (the `others` value of $.state: the boards a new session
 // may take over, and the clean-up list), and words what the pane says after an action.
 
-import { sessionOfKey, summarizeBoard, candidatesOf, cleanupOf, metaKey, BOARD_PREFIX } from './boards.js'
+import { sessionOfKey, summarizeBoard, candidatesOf, cleanupOf, metaKey, sealKey, BOARD_PREFIX, META_PREFIX, SEAL_PREFIX } from './boards.js'
 
 /** The `others` value when nothing is known yet. */
 export const NO_OTHERS = { boards: [], more: 0, cleanup: [], bytes: 0, notice: '' }
@@ -21,13 +21,13 @@ export const isSame = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 
 const sizeOf = (value) => (value === undefined ? 0 : JSON.stringify(value).length)
 
-/** Whether a key is one of the mod's own (a board or a meta). */
-export const isMine = (key) => typeof key === 'string' && (key.startsWith(BOARD_PREFIX) || key.startsWith('meta:'))
+/** Whether a key is one of the mod's own (a board, a meta or a seal). */
+export const isMine = (key) => typeof key === 'string' && (key.startsWith(BOARD_PREFIX) || key.startsWith(META_PREFIX) || key.startsWith(SEAL_PREFIX))
 
 /**
  * Every other session's board from the store's `keys` and a Map of their `values` (by key):
- * { entries: the summaries, bytes: the JSON length of all the other sessions' board and meta keys }.
- * The session `me` is left out; a meta whose board is gone still counts for its size.
+ * { entries: the summaries, bytes: the JSON length of all the other sessions' board, meta and seal
+ * keys }. The session `me` is left out; a meta or a seal whose board is gone still counts for its size.
  */
 export function scanEntries(me, keys, values) {
   const entries = []
@@ -37,11 +37,13 @@ export function scanEntries(me, keys, values) {
     const sid = sessionOfKey(key)
     if (sid === null || sid === me) continue
     seen.add(sid)
-    bytes += sizeOf(values.get(key)) + sizeOf(values.get(metaKey(sid)))
-    entries.push(summarizeBoard(sid, values.get(key), values.get(metaKey(sid))))
+    bytes += sizeOf(values.get(key)) + sizeOf(values.get(metaKey(sid))) + sizeOf(values.get(sealKey(sid)))
+    entries.push(summarizeBoard(sid, values.get(key), values.get(metaKey(sid)), values.get(sealKey(sid))))
   }
   for (const key of keys) {
-    if (typeof key === 'string' && key.startsWith('meta:') && key.slice(5) !== me && !seen.has(key.slice(5))) bytes += sizeOf(values.get(key))
+    if (typeof key !== 'string') continue
+    const prefix = key.startsWith(META_PREFIX) ? META_PREFIX : key.startsWith(SEAL_PREFIX) ? SEAL_PREFIX : null
+    if (prefix !== null && key.slice(prefix.length) !== me && !seen.has(key.slice(prefix.length))) bytes += sizeOf(values.get(key))
   }
   return { entries, bytes }
 }

@@ -6,8 +6,13 @@
 //   firstPrompt, title                         what the session began with (to tell boards apart)
 //   handedFrom: { sid, sid8, cwdName, updatedAt, count, at }
 //                                              set on the board that took cards over
-//   handedOver: { to, toSid8, toCwdName, at }  set on the board that was taken over: it is sealed
-//                                              (read-only); the cards under `board:` are never touched
+// and, only once the board was taken over, `seal:<sessionId>`:
+//   { to, toSid8, toCwdName, at }              the board is sealed (read-only); the cards under
+//                                              `board:` are never touched
+// The seal has a key of its own because the meta is read, laid over and written back by the session
+// that owns the board at every save: a seal kept in it could be written back away. Only the session
+// that took the board over writes the seal key, and only [このセッションで書けるように戻す] deletes it.
+// 0.9.0 kept the seal in the meta as `handedOver`; that is still read as a seal (never written).
 // A new session's pane lists the other boards, so it can copy one over; the copied board stays,
 // sealed. Two options (off in this version) keep the store from filling with old boards:
 // `archiveDir` (write a board to a Markdown file before it is deleted) and `autoCleanDays`.
@@ -66,6 +71,9 @@ export const settingsLine = (c = config) =>
 
 export const BOARD_PREFIX = 'board:'
 export const metaKey = (sessionId) => 'meta:' + sessionId
+export const SEAL_PREFIX = 'seal:'
+export const META_PREFIX = 'meta:'
+export const sealKey = (sessionId) => SEAL_PREFIX + sessionId
 
 /** The session id of a `board:` key, or null for any other key. */
 export const sessionOfKey = (key) => (typeof key === 'string' && key.startsWith(BOARD_PREFIX) && key.length > BOARD_PREFIX.length ? key.slice(BOARD_PREFIX.length) : null)
@@ -87,8 +95,8 @@ export const promptLine = (text, max = SHELF_LIMITS.prompt) => clip(text, max)
 const isNum = (n) => typeof n === 'number' && Number.isFinite(n)
 const isText = (s) => typeof s === 'string' && s !== ''
 
-/** A stored `handedOver` when it is sound ({ to, toSid8, toCwdName, at }), else null. */
-function readHandedOver(value) {
+/** A stored seal (the `seal:` value, or a 0.9.0 meta's `handedOver`) when it is sound ({ to, toSid8, toCwdName, at }), else null. */
+export function readSeal(value) {
   if (value == null || typeof value !== 'object' || !isText(value.to) || !isNum(value.at)) return null
   return { to: value.to, toSid8: isText(value.toSid8) ? value.toSid8 : shortId(value.to), toCwdName: isText(value.toCwdName) ? value.toCwdName : UNKNOWN_FOLDER, at: value.at }
 }
@@ -108,13 +116,13 @@ function readHandedFrom(value) {
 
 /**
  * A stored `meta:` value when it is sound, else null: { updatedAt, cwdName, count } and, when
- * they are there and well-formed, firstPrompt, title, handedOver, handedFrom. A field it does not
- * know, or one of the wrong type, is let go.
+ * they are there and well-formed, firstPrompt, title, handedFrom and, in a meta 0.9.0 wrote, the
+ * seal as handedOver. A field it does not know, or one of the wrong type, is let go.
  */
 export function readMeta(value) {
   if (value == null || typeof value !== 'object') return null
   if (!isNum(value.updatedAt)) return null
-  const handedOver = readHandedOver(value.handedOver)
+  const handedOver = readSeal(value.handedOver)
   const handedFrom = readHandedFrom(value.handedFrom)
   return {
     updatedAt: value.updatedAt,
@@ -181,9 +189,9 @@ export const cardStampOf = (ms, now) => (typeof now === 'number' && daysBefore(m
  * allTitles, pinnedCount, firstPrompt, title, handedOver }. Without a sound meta the time is that
  * of the newest card (null if there is none) and the folder is unknown; the count is always the
  * cards the board holds. `titles` are the first three in the pane's order, `allTitles` up to 20
- * ({ title, pinned }).
+ * ({ title, pinned }). `handedOver` is the seal: the `seal:` value, else a 0.9.0 meta's.
  */
-export function summarizeBoard(sid, boardValue, metaStored) {
+export function summarizeBoard(sid, boardValue, metaStored, sealStored) {
   const cards = sanitizeCards(boardValue)
   const meta = readMeta(metaStored)
   const newest = cards.reduce((m, c) => Math.max(m, c.updatedAt), -Infinity)
@@ -199,7 +207,7 @@ export function summarizeBoard(sid, boardValue, metaStored) {
     pinnedCount: cards.filter((c) => c.pinned === true).length,
     firstPrompt: meta?.firstPrompt ?? null,
     title: meta?.title ?? null,
-    handedOver: meta?.handedOver ?? null,
+    handedOver: readSeal(sealStored) ?? meta?.handedOver ?? null,
   }
 }
 
@@ -287,6 +295,13 @@ const sealedTo = (sealed) => `別のセッション（${sealed.toCwdName} · ID 
 export const sealedDenyText = (sealed) =>
   `このボードは読み取り専用です。${stampOf(sealed.at)} に、${sealedTo(sealed)}へ引き継がれました。` +
   'カードの追加・書き換え・削除はできません（list_cards で読むことはできます）。続きは引き継ぎ先のセッションで書くよう、利用者に伝えてください。'
+
+/** What a write is refused with when the seal could not be read (read by Claude): a board that may be sealed is not written. */
+export const sealUnreadableText = (message) =>
+  `ボードの状態（読み取り専用かどうか）を読めなかったので、書き込みを止めました（${message}）。もう一度試してください。何度やっても同じなら、そのことを利用者に伝えてください。`
+
+/** The line for the frame when [引き継ぐ] is pressed on a board that is read-only itself. */
+export const SELF_SEALED = 'このボードは読み取り専用なので、引き継げません。先に [このセッションで書けるように戻す] を押してください'
 
 /** The first line of list_cards on a sealed board. */
 export const sealedListLine = (sealed) => `（このボードは読み取り専用です。${stampOf(sealed.at)} に${sealedTo(sealed)}へ引き継がれました）`

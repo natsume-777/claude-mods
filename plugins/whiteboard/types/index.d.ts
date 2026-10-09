@@ -13,7 +13,7 @@ export type WhiteboardCard = {
 
 /** Another session's board as the pane's list of boards to take over shows it. */
 export type WhiteboardOtherBoard = {
-  /** The session's id (the store keys are `board:<sid>` and `meta:<sid>`). */
+  /** The session's id (the store keys are `board:<sid>`, `meta:<sid>` and, once taken over, `seal:<sid>`). */
   sid: string
   /** Its first 8 plain characters: the buttons' keys (`peek-<sid8>`, `take-<sid8>`) and the archive file's name. */
   sid8: string
@@ -33,7 +33,7 @@ export type WhiteboardOtherBoard = {
   firstPrompt: string | null
   /** The session's title, when the app handed it over; null otherwise. */
   title: string | null
-  /** Set on a sealed board; such a board is never in the list of boards to take over. */
+  /** The seal (the `seal:<sid>` value; a 0.9.0 board has it in its meta). Set on a sealed board; such a board is never in the list of boards to take over. */
   handedOver: { to: string; toSid8: string; toCwdName: string; at: number } | null
 }
 
@@ -79,6 +79,8 @@ declare module 'claude-code' {
     whiteboard: {
       /** The cards in the order they were added. Unset until they are loaded from the store. */
       cards: WhiteboardCard[]
+      /** The session id the `cards` belong to. The drawings take `cards` only when it is this session's (the process goes on under another id after /clear). */
+      owner: string
       /** The other sessions' boards in the store: the boards to take over (the first few, in order), how many more there are, the clean-up list (empty unless it is switched on), the JSON size of all the other keys, and the line about the last action (or ''). Never stored. */
       others: { boards: WhiteboardOtherBoard[]; more: number; cleanup: WhiteboardCleanupRow[]; bytes: number; notice: string }
       /**

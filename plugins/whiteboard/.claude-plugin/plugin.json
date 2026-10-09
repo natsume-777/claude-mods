@@ -1,6 +1,6 @@
 {
   "name": "whiteboard",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "A whiteboard Claude writes to: titled Markdown cards (steps, running jobs, links) that stay put instead of scrolling away in the chat",
   "author": { "name": "Natsume777" },
   "types": "./types/index.d.ts",
@@ -8,7 +8,7 @@
     "handover": {
       "type": "boolean",
       "title": "前のセッションのボードを引き継ぐ",
-      "description": "ボードが空のとき、パネルに前のセッションのボードの一覧と [引き継ぐ] を出し、入力欄の上の帯にも一言足す。引き継いだ元のボードは、読み取り専用で残る。オフでも、すでに読み取り専用になったボードは書き込めないまま",
+      "description": "ボードが空のとき、パネルに前のセッションのボードの一覧と [引き継ぐ] を出し、入力欄の上の帯にも一言足す。引き継いだ元のボードは、読み取り専用で残る。オフにすると、最初の依頼と会話の題も保存しない。オフでも、すでに読み取り専用になったボードは書き込めないまま",
       "default": true
     },
     "guide": {
