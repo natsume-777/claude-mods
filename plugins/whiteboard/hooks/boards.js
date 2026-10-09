@@ -18,7 +18,16 @@
 // `archiveDir` (write a board to a Markdown file before it is deleted) and `autoCleanDays`.
 
 import { LIMITS, sanitizeCards, orderedCards, clockOf } from './board.js'
-import { clip } from './background.js'
+
+// The engine clips a long text and appends this marker
+const CLIP_MARKER = /\.\.\. \[\+\d+ chars\]\s*$/
+
+/** One line of a text: blanks folded, the engine's "... [+N chars]" marker made …, cut to `max` characters with a trailing …. */
+function clip(value, max = 60) {
+  const line = (typeof value === 'string' ? value : '').replace(CLIP_MARKER, '…').replace(/\s+/g, ' ').trim()
+  const chars = [...line]
+  return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : line
+}
 
 /** What the list shows and keeps at most. */
 export const SHELF_LIMITS = {
