@@ -169,8 +169,8 @@ function drawBoardHead(ui, b, now) {
   })
 }
 
-// The second line: what the session was about (its title, else its first request)
-const aboutOf = (b) => (b.title !== null ? b.title : b.firstPrompt !== null ? `「${b.firstPrompt}」` : '最初の依頼: 不明')
+// The second line: what the session was about (its title, else the first thing typed in it)
+const aboutOf = (b) => (b.title !== null ? b.title : b.firstPrompt !== null ? `「${b.firstPrompt}」` : '最初に打った言葉: 不明')
 
 function drawBoardRow(ui, b, { open, single, hasCards, now }, actions) {
   const { Box, Text, Button } = ui

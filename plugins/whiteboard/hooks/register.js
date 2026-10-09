@@ -231,12 +231,18 @@ async function saveCards($, cards, extra = {}) {
     try {
       const prev = readMeta(await $.store.get(metaKey(id)))
       const note = noted.get(id)
-      const patch = { updatedAt: await $.clock.now(), cwdName: cwdNameOf(await $.session.cwd()), count: cards.length, firstPrompt: note?.firstPrompt, title: note?.title, ...extra }
+      const patch = { updatedAt: await $.clock.now(), cwdName: await folderName($), count: cards.length, firstPrompt: note?.firstPrompt, title: note?.title, ...extra }
       await $.store.set(metaKey(id), mergeMeta(prev, patch))
     } catch {}
   }
   await $.state.set(CARDS, cards)
   await $.state.set(OWNER, id)
+}
+
+// The folder a board is shown under: the last folder name of the session root (not of the working
+// folder, which moves into subfolders), so one project keeps one name. Stored as `cwdName`.
+async function folderName($) {
+  return cwdNameOf(await $.session.root())
 }
 
 // ---- The small state values
@@ -354,7 +360,7 @@ async function scanStore($) {
 function refreshOthers($, notice) {
   if (!wantsOthers()) return Promise.resolve()
   return exclusiveOthers(async () => {
-    const options = { me: await $.session.id(), cwdName: cwdNameOf(await $.session.cwd()), notice, handover: handoverOn(), admin: SHELF_ADMIN_ENABLED }
+    const options = { me: await $.session.id(), cwdName: await folderName($), notice, handover: handoverOn(), admin: SHELF_ADMIN_ENABLED }
     const next = othersOf(await scanStore($), options)
     await setOthers($, next)
   })
@@ -393,7 +399,7 @@ async function handOver($, row, confirm) {
   const taken = (await readSealState($, row.sid)).sealed
   if (taken && taken.to !== me) return ALREADY(taken)
   const now = await $.clock.now()
-  const cwdName = cwdNameOf(await $.session.cwd())
+  const cwdName = await folderName($)
   return exclusive(async () => {
     // This board may have been sealed since the pane last looked: nothing is written to it then
     const own = (await readSealState($, me)).sealed
