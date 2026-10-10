@@ -8,12 +8,22 @@
 // `A((text))`, `A([text])`, `A{text}`, with quotes in the text allowed; edges `-->` `---` `-.->`
 // `-.-` `==>` `===`, `-- text -->`, `-->|text|`; chains `A --> B --> C`; `A & B --> C`; `;` and
 // newlines; `%%` comments; `style`, `classDef`, `class`, `linkStyle` and `click` lines are
-// skipped. A subgraph, `direction` and any other syntax give null.
+// skipped. `subgraph id`, `subgraph id[title]`, `subgraph id["title"]`, `subgraph title words`
+// up to `end`, nested, with `direction` inside one read but not followed. A node belongs to the
+// innermost subgraph whose own lines mention it first (as mermaid: the subgraph closed first wins).
+// An edge to or from a subgraph itself (`A --> sg1`) is not drawn: the diagram gives null, as do a
+// `direction` outside a subgraph, an empty subgraph and any other syntax.
 // Also sequenceDiagram with participants / actors and the arrows `->>` `-->>` `->` `-->` `-x`
 // `--x` `-)` `--)` with a message; notes, loops, activations and the rest give null.
 //
 // Drawn: layers by the longest path (a cycle's back edge is drawn as a returning curve), nodes
 // filled and edges and labels on their own small fills, so it reads on a light and a dark theme.
+// A subgraph is a faint rounded box around its members with its title on a small fill in the band
+// at the top of the box, left-most where no edge crosses it (a box whose band has no such place is
+// widened and laid out again); its members are kept side by side in each layer and the boxes of
+// one level are packed next to each other, so they never cross. If the boxes still came out
+// crossing a node or each other, or a title still had no clear place, the diagram gives null
+// rather than a misleading picture.
 
 import { cells } from './board.js'
 
@@ -23,6 +33,7 @@ export const MERMAID_LIMITS = {
   edges: 60,
   label: 80,
   messages: 40,
+  subgraphs: 12,
 }
 
 // ---- Parsing
@@ -146,6 +157,27 @@ const skipBlanks = (s, i) => {
   return i
 }
 
+const named = (id, title) => ({ id, label: labelOf(title).replace(/\n/g, ' ') || id })
+
+// What follows `subgraph`: { id, label }, or null. `id`, `id[title]`, `id ["title"]`, `"title"`,
+// and a bare title of several words, which is its own id (no edge can name it)
+function subgraphHead(rest) {
+  if (rest === '') return null
+  const quoted = /^"([^"]*)"$/.exec(rest)
+  if (quoted) return named(quoted[1], quoted[1])
+  const m = ID.exec(rest)
+  if (m) {
+    const after = rest.slice(m[0].length).trim()
+    if (after === '') return named(m[0], m[0])
+    if (after.startsWith('[')) {
+      const t = /^\[\s*(?:"([^"]*)"|([^\]"]*))\s*\]$/.exec(after)
+      return t ? named(m[0], t[1] ?? t[2]) : null
+    }
+  }
+  if (/[[\](){}"|]/.test(rest)) return null
+  return named(rest, rest)
+}
+
 /** Parses a flowchart / graph; null when it is not one or uses what is not read. */
 function parseFlowchart(source) {
   const statements = statementsOf(source)
@@ -154,6 +186,12 @@ function parseFlowchart(source) {
   const direction = (header[1] ?? 'TD').toUpperCase().replace('TB', 'TD')
   const nodes = []
   const edges = []
+  // The subgraphs in the order they open: { id, label, parent, nodes }, nodes being the ones
+  // directly in it; `open` are those not closed yet (innermost last), `owned` the nodes given out
+  const subgraphs = []
+  const open = []
+  const mentioned = new Map()
+  const owned = new Set()
   const find = (id) => nodes.find((n) => n.id === id)
   const note = (n) => {
     let node = find(n.id)
@@ -166,11 +204,34 @@ function parseFlowchart(source) {
       node.label = labelOf(n.text) || n.id
       node.shape = n.shape
     }
+    const inner = open.at(-1)
+    if (inner && !mentioned.get(inner).includes(node.id)) mentioned.get(inner).push(node.id)
     return node
   }
   for (const s of statements.slice(1)) {
     if (/^(style|classDef|class|linkStyle|click)\b/.test(s)) continue
-    if (/^(subgraph|end|direction)\b/.test(s)) return null
+    if (/^subgraph\b/.test(s)) {
+      const head = subgraphHead(s.slice('subgraph'.length).trim())
+      if (!head || subgraphs.length >= MERMAID_LIMITS.subgraphs || subgraphs.some((g) => g.id === head.id)) return null
+      const group = { ...head, parent: open.at(-1)?.id ?? null, nodes: [] }
+      subgraphs.push(group)
+      open.push(group)
+      mentioned.set(group, [])
+      continue
+    }
+    if (/^end\b/.test(s)) {
+      if (s !== 'end' || open.length === 0) return null
+      // The nodes its own lines mention that no subgraph closed before took
+      const group = open.pop()
+      group.nodes = mentioned.get(group).filter((id) => !owned.has(id))
+      for (const id of group.nodes) owned.add(id)
+      continue
+    }
+    if (/^direction\b/.test(s)) {
+      // Read inside a subgraph, but the layout keeps the diagram's direction
+      if (open.length === 0 || !/^direction\s+(TB|TD|BT|LR|RL)$/i.test(s)) return null
+      continue
+    }
     let i = 0
     let previous = null
     for (;;) {
@@ -205,7 +266,12 @@ function parseFlowchart(source) {
   }
   if (nodes.length === 0 || nodes.some((n) => [...n.label].length > MERMAID_LIMITS.label)) return null
   if (edges.some((e) => [...e.label].length > MERMAID_LIMITS.label)) return null
-  return { kind: 'flowchart', direction, nodes, edges }
+  if (open.length > 0) return null
+  // An edge to a subgraph itself (a node of its id) is not drawn; nor is a subgraph with no node
+  if (subgraphs.some((g) => find(g.id) || [...g.label].length > MERMAID_LIMITS.label)) return null
+  const holds = (g) => g.nodes.length > 0 || subgraphs.some((c) => c.parent === g.id && holds(c))
+  if (!subgraphs.every(holds)) return null
+  return { kind: 'flowchart', direction, nodes, edges, subgraphs }
 }
 
 const MESSAGE = /^([^\s:+-]+?)\s*(--?>>|--?>|--?x|--?\))\s*[+-]?\s*([^\s:]+?)\s*:\s*(.*)$/
@@ -304,6 +370,9 @@ export function layersOf(model) {
   ids.forEach(depth)
   const layers = []
   for (const id of ids) (layers[layerOf.get(id)] ??= []).push(id)
+  // With subgraphs, each subgraph's members are kept together in every layer after each step
+  const regroup = groupOrder(model)
+  if (regroup) layers.forEach((l, li) => (layers[li] = regroup(l)))
   // Order inside a layer by the mean place of the neighbours (two sweeps down and up)
   const place = new Map()
   const mark = () => layers.forEach((l) => l.forEach((id, k) => place.set(id, k)))
@@ -320,21 +389,65 @@ export function layersOf(model) {
     keyed.sort((a, b) => a.key - b.key || a.k - b.k)
     return keyed.map((x) => x.id)
   }
+  const step = (list, neighbours) => (regroup ? regroup(sweep(list, neighbours)) : sweep(list, neighbours))
   for (let round = 0; round < 2; round++) {
     for (let l = 1; l < layers.length; l++) {
-      layers[l] = sweep(layers[l], preds)
+      layers[l] = step(layers[l], preds)
       mark()
     }
     for (let l = layers.length - 2; l >= 0; l--) {
-      layers[l] = sweep(layers[l], succs)
+      layers[l] = step(layers[l], succs)
       mark()
     }
   }
   return { layers, isBack, layerOf }
 }
 
-/** Places the nodes: { boxes: Map id -> { x, y, w, h, shape, label } (centres), layers, isBack, layerOf }. */
-export function layoutFlowchart(model) {
+// The subgraphs a node is in, outermost first: Map id -> subgraph ids (none for a node outside)
+function chainsOf(model) {
+  const parent = new Map(model.subgraphs.map((g) => [g.id, g.parent]))
+  const chains = new Map()
+  for (const g of model.subgraphs) {
+    const chain = []
+    for (let at = g.id; at !== null; at = parent.get(at)) chain.unshift(at)
+    for (const id of g.nodes) chains.set(id, chain)
+  }
+  return chains
+}
+
+// A function that reorders a layer so each subgraph's members are next to each other (nested
+// ones inside theirs), the groups and the loose nodes ordered by their mean place; null without
+// subgraphs
+function groupOrder(model) {
+  if (!model.subgraphs?.length) return null
+  const chains = chainsOf(model)
+  const arrange = (ids, depth) => {
+    const order = []
+    const byKey = new Map()
+    ids.forEach((id, k) => {
+      const chain = chains.get(id) ?? []
+      const key = depth < chain.length ? 'g' + chain[depth] : 'n' + id
+      if (!byKey.has(key)) {
+        byKey.set(key, { isGroup: depth < chain.length, ids: [], sum: 0, first: order.length })
+        order.push(byKey.get(key))
+      }
+      const g = byKey.get(key)
+      g.ids.push(id)
+      g.sum += k
+    })
+    order.sort((a, b) => a.sum / a.ids.length - b.sum / b.ids.length || a.first - b.first)
+    return order.flatMap((g) => (g.isGroup ? arrange(g.ids, depth + 1) : g.ids))
+  }
+  return (list) => arrange(list, 0)
+}
+
+/**
+ * Places the nodes: { boxes: Map id -> { x, y, w, h, shape, label } (centres), groups, layers,
+ * isBack, layerOf }. `groups` are the subgraphs' boxes (see layoutGrouped), none without
+ * subgraphs; null when they would not fit.
+ */
+export function layoutFlowchart(model, lanes = new Map()) {
+  if (model.subgraphs?.length) return layoutGrouped(model, lanes)
   const { layers, isBack, layerOf } = layersOf(model)
   const isVertical = model.direction === 'TD' || model.direction === 'BT'
   const sizes = new Map(model.nodes.map((n) => [n.id, sizeOf(n)]))
@@ -361,7 +474,213 @@ export function layoutFlowchart(model) {
     }
     at += bandOf[li] + gapMain
   })
-  return { boxes, layers, isBack, layerOf }
+  return { boxes, groups: [], layers, isBack, layerOf }
+}
+
+// ---- Layout of a flowchart with subgraphs
+
+// A subgraph's box: the padding around its members (`top` on the title's side), the title chip
+// in its top-left corner, and the room kept between a box's edge and what is outside it
+const GROUP = { pad: 12, top: 34, chipX: 8, chipY: 6, chipH: 18, clear: 14 }
+const chipWidth = (label) => textWidth(label) + 12
+const titleRoom = (label) => chipWidth(label) + 2 * GROUP.chipX
+
+/**
+ * The layout with subgraphs. The layers and their order are those of layersOf (each subgraph's
+ * members kept together); across the layers, the items of one level (the loose nodes and the
+ * subgraphs) are packed in their order, a subgraph as one block over all the layers it covers,
+ * so sibling boxes lie side by side; along the layers, the gaps grow to make room for the boxes'
+ * padding. Each group: { id, label, parent, depth, members (all node ids inside), x, y, w, h
+ * (top-left corner and size), chip: { x, y, w, h } }. Null when the result does not pass
+ * groupsFit. `lanes` (subgraph id -> pixels) widens a box by that much on its starting side
+ * across the title band (left for TD / BT, along the layers' start for LR / RL), its members kept
+ * clear of it: the room placeChips finds for a title the edges left no gap for.
+ */
+function layoutGrouped(model, lanes = new Map()) {
+  const { layers, isBack, layerOf } = layersOf(model)
+  const isVertical = model.direction === 'TD' || model.direction === 'BT'
+  const isReversed = model.direction === 'BT' || model.direction === 'RL'
+  const sizes = new Map(model.nodes.map((n) => [n.id, sizeOf(n)]))
+  const main = (id) => (isVertical ? sizes.get(id).h : sizes.get(id).w)
+  const cross = (id) => (isVertical ? sizes.get(id).w : sizes.get(id).h)
+  const gapMain = isVertical ? 46 : 64
+  const gapCross = 28
+  // A box's padding: along the layers (in their order, before flipping BT / RL) and across them;
+  // the title's side gets `top`
+  const padMainStart = model.direction === 'TD' ? GROUP.top : GROUP.pad
+  const padMainEnd = model.direction === 'BT' ? GROUP.top : GROUP.pad
+  const padCrossStart = isVertical ? GROUP.pad : GROUP.top
+  const padCrossEnd = GROUP.pad
+
+  // Where the plain layout would put each node across: it orders the items below
+  const totalOf = layers.map((l) => l.reduce((s, id) => s + cross(id), 0) + gapCross * (l.length - 1))
+  const widest = Math.max(...totalOf)
+  const guess = new Map()
+  layers.forEach((l, li) => {
+    let c = (widest - totalOf[li]) / 2
+    for (const id of l) {
+      guess.set(id, c + cross(id) / 2)
+      c += cross(id) + gapCross
+    }
+  })
+
+  // Across: pack the items of one level, then place them
+  const nodeIndex = new Map(model.nodes.map((n, i) => [n.id, i]))
+  const owned = new Set(model.subgraphs.flatMap((g) => g.nodes))
+  const childrenOf = (parent) => model.subgraphs.filter((g) => g.parent === parent)
+  const descendants = new Map()
+  const nodeItem = (id) => ({ id, ids: [id], width: cross(id) })
+  const groupItem = (g) => {
+    const inner = pack(itemsOf(g))
+    const content = isVertical ? Math.max(inner.width, titleRoom(g.label) - padCrossStart - padCrossEnd) : inner.width
+    const ids = inner.items.flatMap((it) => it.ids)
+    descendants.set(g.id, ids)
+    const lane = isVertical ? lanes.get(g.id) ?? 0 : 0
+    return { id: g.id, group: g, ids, inner, width: padCrossStart + lane + content + padCrossEnd, offset: padCrossStart + lane + (content - inner.width) / 2 }
+  }
+  const itemsOf = (g) => [
+    ...childrenOf(g ? g.id : null).map(groupItem),
+    ...(g ? g.nodes : model.nodes.map((n) => n.id).filter((id) => !owned.has(id))).map(nodeItem),
+  ]
+  // Items in their order, each started as far as the others of its layers allow and no further
+  // than where a centred row would put it
+  function pack(items) {
+    for (const it of items) {
+      it.layers = [...new Set(it.ids.map((id) => layerOf.get(id)))]
+      it.key = it.ids.reduce((s, id) => s + guess.get(id), 0) / it.ids.length
+      it.first = Math.min(...it.ids.map((id) => nodeIndex.get(id)))
+    }
+    items.sort((a, b) => a.key - b.key || a.first - b.first)
+    const total = new Map()
+    for (const it of items) for (const l of it.layers) total.set(l, (total.has(l) ? total.get(l) + gapCross : 0) + it.width)
+    const wide = Math.max(...total.values())
+    const before = new Map()
+    const frontier = new Map()
+    for (const it of items) {
+      let start = 0
+      for (const l of it.layers) {
+        start = Math.max(start, (wide - total.get(l)) / 2 + (before.get(l) ?? 0))
+        if (frontier.has(l)) start = Math.max(start, frontier.get(l) + gapCross)
+      }
+      it.start = start
+      for (const l of it.layers) {
+        before.set(l, (before.get(l) ?? 0) + it.width + gapCross)
+        frontier.set(l, start + it.width)
+      }
+    }
+    return { items, width: Math.max(...items.map((it) => it.start + it.width)) }
+  }
+  const crossAt = new Map()
+  const crossSpan = new Map()
+  const place = (items, offset) => {
+    for (const it of items) {
+      const s = offset + it.start
+      if (it.group) {
+        crossSpan.set(it.id, [s, s + it.width])
+        place(it.inner.items, s + it.offset)
+      } else crossAt.set(it.id, s + it.width / 2)
+    }
+  }
+  place(pack(itemsOf(null)).items, 0)
+
+  // Along: the layers with the given gaps between them, and each box's extent along them
+  const bandOf = layers.map((l) => Math.max(...l.map(main)))
+  const lay = (gaps) => {
+    const startOf = []
+    let at = 0
+    layers.forEach((_, li) => {
+      startOf.push(at)
+      at += bandOf[li] + (li < layers.length - 1 ? gaps[li] : 0)
+    })
+    const mainAt = (id) => startOf[layerOf.get(id)] + bandOf[layerOf.get(id)] / 2
+    const span = new Map()
+    const measure = (g) => {
+      let lo = Infinity
+      let hi = -Infinity
+      for (const id of g.nodes) {
+        lo = Math.min(lo, mainAt(id) - main(id) / 2)
+        hi = Math.max(hi, mainAt(id) + main(id) / 2)
+      }
+      for (const c of childrenOf(g.id)) {
+        const [a, b] = measure(c)
+        lo = Math.min(lo, a)
+        hi = Math.max(hi, b)
+      }
+      lo -= padMainStart + (isVertical ? 0 : lanes.get(g.id) ?? 0)
+      hi += padMainEnd
+      // Left to right, the title's width is along the layers: the box reaches past its last layer
+      if (!isVertical) hi = Math.max(hi, lo + titleRoom(g.label))
+      span.set(g.id, [lo, hi])
+      return [lo, hi]
+    }
+    childrenOf(null).forEach(measure)
+    return { startOf, length: at, mainAt, span }
+  }
+  const layersIn = (g) => descendants.get(g.id).map((id) => layerOf.get(id))
+  const rough = lay(layers.slice(1).map(() => gapMain))
+  const gaps = layers.slice(1).map((_, li) => {
+    let over = 0
+    let under = 0
+    for (const g of model.subgraphs) {
+      const [lo, hi] = rough.span.get(g.id)
+      if (Math.max(...layersIn(g)) === li) over = Math.max(over, hi - (rough.startOf[li] + bandOf[li]))
+      if (Math.min(...layersIn(g)) === li + 1) under = Math.max(under, rough.startOf[li + 1] - lo)
+    }
+    return Math.max(gapMain, over + under + GROUP.clear)
+  })
+  const final = lay(gaps)
+
+  // On the screen: BT and RL run the layers the other way
+  const flip = (m) => (isReversed ? final.length - m : m)
+  const boxes = new Map()
+  for (const node of model.nodes) {
+    const m = flip(final.mainAt(node.id))
+    const k = crossAt.get(node.id)
+    boxes.set(node.id, { ...sizes.get(node.id), x: isVertical ? k : m, y: isVertical ? m : k, shape: node.shape, label: node.label })
+  }
+  const depthOf = (g) => (g.parent === null ? 0 : 1 + depthOf(model.subgraphs.find((p) => p.id === g.parent)))
+  const groups = model.subgraphs.map((g) => {
+    const [lo, hi] = final.span.get(g.id)
+    const [a, b] = isReversed ? [final.length - hi, final.length - lo] : [lo, hi]
+    const [c0, c1] = crossSpan.get(g.id)
+    const box = isVertical ? { x: c0, y: a, w: c1 - c0, h: b - a } : { x: a, y: c0, w: b - a, h: c1 - c0 }
+    const chip = { x: box.x + GROUP.chipX, y: box.y + GROUP.chipY, w: chipWidth(g.label), h: GROUP.chipH }
+    return { id: g.id, label: g.label, parent: g.parent, depth: depthOf(g), members: descendants.get(g.id), ...box, chip }
+  })
+  groups.sort((p, q) => p.depth - q.depth)
+  if (!groupsFit(boxes, groups)) return null
+  return { boxes, groups, layers, isBack, layerOf }
+}
+
+/**
+ * Whether the subgraphs' boxes can be drawn without misleading: each member node inside its box
+ * and clear of its title chip, every other node outside it, a nested box inside its parent and
+ * clear of the parent's chip, and boxes that are not nested apart from each other.
+ */
+export function groupsFit(boxes, groups) {
+  const inside = (a, b) => a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h
+  const meets = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+  const byId = new Map(groups.map((g) => [g.id, g]))
+  const isAbove = (g, h) => {
+    for (let at = h.parent; at !== null && at !== undefined; at = byId.get(at)?.parent) if (at === g.id) return true
+    return false
+  }
+  for (const g of groups) {
+    for (const [id, b] of boxes) {
+      const r = { x: b.x - b.w / 2, y: b.y - b.h / 2, w: b.w, h: b.h }
+      if (g.members.includes(id)) {
+        if (!inside(r, g) || meets(r, g.chip)) return false
+      } else if (meets(r, g)) return false
+    }
+    if (!inside(g.chip, g)) return false
+    for (const h of groups) {
+      if (h === g || isAbove(h, g)) continue
+      if (isAbove(g, h)) {
+        if (!inside(h, g) || meets(h, g.chip)) return false
+      } else if (meets(g, h)) return false
+    }
+  }
+  return true
 }
 
 // ---- Drawing
@@ -384,6 +703,8 @@ const COLOR = {
   tagFill: '#f6f7fb',
   tagStroke: '#b8bfd2',
   tagText: '#2b3040',
+  groupFill: '#6475c9',
+  groupStroke: '#6475c9',
 }
 
 const n1 = (v) => Math.round(v * 10) / 10
@@ -439,16 +760,136 @@ const tagSvg = (label, x, y) => {
   return `<rect x="${n1(x - w / 2)}" y="${n1(y - h / 2)}" width="${n1(w)}" height="${n1(h)}" rx="4" fill="${COLOR.tagFill}" stroke="${COLOR.tagStroke}" stroke-width="1"/>` + textAt(label, x, y, COLOR.tagText)
 }
 
-/** { source, width, height } of a flowchart's SVG. */
+// A subgraph's box, faint enough for nested ones to show, its title on a small fill
+function groupSvg(g) {
+  const { chip } = g
+  return (
+    `<rect x="${n1(g.x)}" y="${n1(g.y)}" width="${n1(g.w)}" height="${n1(g.h)}" rx="8" fill="${COLOR.groupFill}" fill-opacity="0.07" stroke="${COLOR.groupStroke}" stroke-opacity="0.6" stroke-width="1"/>` +
+    `<rect x="${n1(chip.x)}" y="${n1(chip.y)}" width="${n1(chip.w)}" height="${n1(chip.h)}" rx="4" fill="${COLOR.tagFill}" stroke="${COLOR.tagStroke}" stroke-width="1"/>` +
+    `<text x="${n1(chip.x + 6)}" y="${n1(chip.y + 13)}" font-size="12" font-weight="600" fill="${COLOR.tagText}">${esc(g.label)}</text>`
+  )
+}
+
+// The rectangle of an edge's label drawn by tagSvg at (x, y)
+const tagRect = (label, x, y) => {
+  const w = textWidth(label) + 12
+  const h = LINE * linesOf(label).length + 4
+  return { x: x - w / 2, y: y - h / 2, w, h }
+}
+
+// Points along a quadratic (p0, c, p1) or a cubic (p0, c1, c2, p1) curve, ends included
+function curvePoints(...ps) {
+  const out = []
+  for (let k = 0; k <= 16; k++) {
+    const t = k / 16
+    let row = ps
+    while (row.length > 1) row = row.slice(1).map((p, i) => ({ x: row[i].x + (p.x - row[i].x) * t, y: row[i].y + (p.y - row[i].y) * t }))
+    out.push(row[0])
+  }
+  return out
+}
+
+/** Whether the segment p–q meets the rectangle r ({ x, y, w, h }), its inside included. */
+export function segmentMeetsRect(p, q, r) {
+  // Liang–Barsky: clip the segment's parameter range to the rectangle's four sides
+  let t0 = 0
+  let t1 = 1
+  const dx = q.x - p.x
+  const dy = q.y - p.y
+  const sides = [
+    [-dx, p.x - r.x],
+    [dx, r.x + r.w - p.x],
+    [-dy, p.y - r.y],
+    [dy, r.y + r.h - p.y],
+  ]
+  for (const [a, b] of sides) {
+    if (a === 0) {
+      if (b < 0) return false
+      continue
+    }
+    const t = b / a
+    if (a < 0) t0 = Math.max(t0, t)
+    else t1 = Math.min(t1, t)
+    if (t0 > t1) return false
+  }
+  return true
+}
+
+// The room kept between a title chip and an edge or an edge's label (the line's width, a head)
+const CHIP_CLEAR = 4
+// How many times a box is widened for its title before the diagram is left as code
+const CHIP_ROUNDS = 3
+
+/**
+ * Moves each subgraph's title chip along its title band (the strip at the top of the box that no
+ * node or inner box reaches) to the leftmost place where no edge and no edge label comes within
+ * CHIP_CLEAR of it; the chip keeps its place when it is clear there already. Returns the groups
+ * whose band has no such place.
+ */
+function placeChips(groups, routes, labels) {
+  const blocked = []
+  for (const g of groups) {
+    const free = (x) => {
+      const r = { x: x - CHIP_CLEAR, y: g.chip.y - CHIP_CLEAR, w: g.chip.w + 2 * CHIP_CLEAR, h: g.chip.h + 2 * CHIP_CLEAR }
+      for (const route of routes) for (let i = 1; i < route.length; i++) if (segmentMeetsRect(route[i - 1], route[i], r)) return false
+      return !labels.some((t) => t.x < r.x + r.w && r.x < t.x + t.w && t.y < r.y + r.h && r.y < t.y + t.h)
+    }
+    const first = g.x + GROUP.chipX
+    const last = g.x + g.w - GROUP.chipX - g.chip.w
+    let at = null
+    for (let x = first; x <= last + 1e-6 && at === null; x += 2) if (free(x)) at = x
+    if (at === null && last > first && free(last)) at = last
+    if (at === null) blocked.push(g)
+    else g.chip = { ...g.chip, x: at }
+  }
+  return blocked
+}
+
+/**
+ * { source, width, height } of a flowchart's SVG, or null when its subgraphs do not fit. With
+ * subgraphs, no edge is drawn across a title: a title the edges leave no room for widens its box
+ * (layoutFlowchart's lanes) and the layout is made again, up to CHIP_ROUNDS times.
+ */
 function flowchartSvg(model) {
-  const { boxes, isBack, layerOf } = layoutFlowchart(model)
-  const parts = { lines: [], heads: [], nodes: [], tags: [] }
-  const points = []
+  let lanes = new Map()
+  for (let round = 0; ; round++) {
+    const layout = layoutFlowchart(model, lanes)
+    if (!layout) return null
+    const edges = edgesSvg(model, layout)
+    const blocked = placeChips(layout.groups, edges.routes, edges.labels)
+    if (blocked.length === 0) return groupsFit(layout.boxes, layout.groups) ? pictureOf(layout, edges) : null
+    if (round === CHIP_ROUNDS) return null
+    lanes = new Map(lanes)
+    for (const g of blocked) lanes.set(g.id, (lanes.get(g.id) ?? 0) + titleRoom(g.label))
+  }
+}
+
+// The picture of a layout and its edges: boxes behind, then lines, heads, nodes and labels
+function pictureOf(layout, edges) {
+  const { boxes, groups: frames } = layout
+  const points = [...edges.points]
   const grow = (x, y) => points.push({ x, y })
   for (const b of boxes.values()) {
     grow(b.x - b.w / 2, b.y - b.h / 2)
     grow(b.x + b.w / 2, b.y + b.h / 2)
   }
+  for (const g of frames) {
+    grow(g.x, g.y)
+    grow(g.x + g.w, g.y + g.h)
+  }
+  const nodes = [...boxes.values()].map(nodeSvg)
+  return wrap(points, [...frames.map(groupSvg), ...edges.lines, ...edges.heads, ...nodes, ...edges.tags])
+}
+
+/**
+ * The edges of a layout: their SVG parts (lines, heads, tags), the points the picture must hold,
+ * and for placeChips the course of each edge as points (`routes`, curves sampled) and the
+ * rectangles of their labels (`labels`).
+ */
+function edgesSvg(model, layout) {
+  const { boxes, isBack, layerOf } = layout
+  const parts = { lines: [], heads: [], tags: [], points: [], routes: [], labels: [] }
+  const grow = (x, y) => parts.points.push({ x, y })
   // Edges between the same two nodes are spread to either side
   const groups = new Map()
   model.edges.forEach((e, i) => {
@@ -464,11 +905,13 @@ function flowchartSvg(model) {
     if (e.from === e.to) {
       const x = a.x + a.w / 2
       parts.lines.push(`<path d="M ${n1(x)} ${n1(a.y - 7)} C ${n1(x + 34)} ${n1(a.y - 30)} ${n1(x + 34)} ${n1(a.y + 30)} ${n1(x)} ${n1(a.y + 7)}" ${stroke}/>`)
+      parts.routes.push(curvePoints({ x, y: a.y - 7 }, { x: x + 34, y: a.y - 30 }, { x: x + 34, y: a.y + 30 }, { x, y: a.y + 7 }))
       if (e.hasHead) parts.heads.push(headSvg(x, a.y + 7, -1, 0.35))
       grow(x + 36, a.y - 30)
       grow(x + 36, a.y + 30)
       if (e.label) {
         parts.tags.push(tagSvg(e.label, x + 40 + textWidth(e.label) / 2, a.y))
+        parts.labels.push(tagRect(e.label, x + 40 + textWidth(e.label) / 2, a.y))
         grow(x + 52 + textWidth(e.label), a.y)
       }
       return
@@ -490,6 +933,7 @@ function flowchartSvg(model) {
     const start = edgePoint(a, (isCurved ? cx : b.x) - a.x, (isCurved ? cy : b.y) - a.y)
     const end = edgePoint(b, (isCurved ? cx : a.x) - b.x, (isCurved ? cy : a.y) - b.y)
     parts.lines.push(isCurved ? `<path d="M ${n1(start.x)} ${n1(start.y)} Q ${n1(cx)} ${n1(cy)} ${n1(end.x)} ${n1(end.y)}" ${stroke}/>` : `<line x1="${n1(start.x)}" y1="${n1(start.y)}" x2="${n1(end.x)}" y2="${n1(end.y)}" ${stroke}/>`)
+    parts.routes.push(isCurved ? curvePoints(start, { x: cx, y: cy }, end) : [start, end])
     if (e.hasHead) parts.heads.push(isCurved ? headSvg(end.x, end.y, end.x - cx, end.y - cy) : headSvg(end.x, end.y, end.x - start.x, end.y - start.y))
     if (isCurved) {
       grow(cx, cy)
@@ -500,12 +944,12 @@ function flowchartSvg(model) {
       const mx = isCurved ? 0.25 * start.x + 0.5 * cx + 0.25 * end.x : (start.x + end.x) / 2
       const my = isCurved ? 0.25 * start.y + 0.5 * cy + 0.25 * end.y : (start.y + end.y) / 2
       parts.tags.push(tagSvg(e.label, mx, my))
+      parts.labels.push(tagRect(e.label, mx, my))
       grow(mx - textWidth(e.label) / 2 - 8, my - 12)
       grow(mx + textWidth(e.label) / 2 + 8, my + 12)
     }
   })
-  for (const b of boxes.values()) parts.nodes.push(nodeSvg(b))
-  return wrap(points, [...parts.lines, ...parts.heads, ...parts.nodes, ...parts.tags])
+  return parts
 }
 
 // The document around drawn parts: the points' box with a margin, the origin moved to it
@@ -575,13 +1019,38 @@ function sequenceSvg(model) {
   return wrap(points, body)
 }
 
-/** The drawing of a mermaid source: { source, width, height, alt }, or null when it is not one this file can draw. */
+// The drawings of the latest sources, by source (null kept too): the pane draws every card at each
+// redraw, and a source drawn once is not parsed and laid out again. A Map keeps the order of
+// insertion; a hit moves to the end, and past MERMAID_MEMO the oldest goes
+const MERMAID_MEMO = 32
+const drawings = new Map()
+
+/**
+ * The drawing of a mermaid source: { source, width, height, alt }, or null when it is not one this
+ * file can draw. The same source gives the same object back while it is among the latest
+ * MERMAID_MEMO drawn (do not change it).
+ */
 export function mermaidSvg(source) {
+  const key = String(source)
+  if (drawings.has(key)) {
+    const hit = drawings.get(key)
+    drawings.delete(key)
+    drawings.set(key, hit)
+    return hit
+  }
+  const drawn = drawMermaid(key)
+  drawings.set(key, drawn)
+  if (drawings.size > MERMAID_MEMO) drawings.delete(drawings.keys().next().value)
+  return drawn
+}
+
+// mermaidSvg without the memo
+function drawMermaid(source) {
   const model = parseMermaid(source)
   if (!model) return null
   try {
     const drawn = model.kind === 'flowchart' ? flowchartSvg(model) : sequenceSvg(model)
-    if (!Number.isFinite(drawn.width) || !Number.isFinite(drawn.height) || drawn.source.length > 100_000) return null
+    if (!drawn || !Number.isFinite(drawn.width) || !Number.isFinite(drawn.height) || drawn.source.length > 100_000) return null
     return { ...drawn, alt: altOf(model) }
   } catch {
     return null
@@ -591,9 +1060,13 @@ export function mermaidSvg(source) {
 /** What the drawing says in words, for a reader that cannot see it. */
 export function altOf(model) {
   const flat = (s) => String(s).replace(/\n/g, ' ')
+  const labelOfNode = (id) => flat(model.nodes.find((n) => n.id === id).label)
+  // A subgraph in words: its title and what is directly in it
+  const groupText = (g) => `${g.label}（${[...model.subgraphs.filter((c) => c.parent === g.id).map((c) => c.label), ...g.nodes.map(labelOfNode)].join('、')}）`
+  const groups = model.subgraphs?.length ? ' / グループ: ' + model.subgraphs.map(groupText).join('、') : ''
   const text =
     model.kind === 'flowchart'
-      ? 'フローチャート: ' + model.nodes.map((n) => flat(n.label)).join('、') + ' / ' + model.edges.map((e) => `${flat(model.nodes.find((n) => n.id === e.from).label)} → ${flat(model.nodes.find((n) => n.id === e.to).label)}${e.label ? `（${flat(e.label)}）` : ''}`).join('、')
+      ? 'フローチャート: ' + model.nodes.map((n) => flat(n.label)).join('、') + ' / ' + model.edges.map((e) => `${flat(model.nodes.find((n) => n.id === e.from).label)} → ${flat(model.nodes.find((n) => n.id === e.to).label)}${e.label ? `（${flat(e.label)}）` : ''}`).join('、') + groups
       : 'シーケンス図: ' +
         model.messages
           .map((m) => `${flat(model.participants.find((p) => p.id === m.from).label)} → ${flat(model.participants.find((p) => p.id === m.to).label)}${m.text ? `: ${flat(m.text)}` : ''}`)

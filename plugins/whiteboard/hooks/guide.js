@@ -9,6 +9,9 @@
 //        itself is not touched) on a turn whose message holds one of the keywords, and at
 //        most once in GUIDE_EVERY turns.
 // off    nothing added.
+//
+// The person sees the board as 「ホワイトボード」 (board.js BOARD_NAME); the texts say ボード, which
+// that name holds, and the keyword ボード matches it too (keywords match as parts of the message).
 
 /** The id of the system prompt section. */
 export const GUIDE_ID = 'whiteboard:guide'
@@ -62,6 +65,7 @@ export function withGuide(result, traits, mode) {
  * and the lines must not have been given in the last GUIDE_EVERY - 1 turns before it.
  */
 export function makeGuideTurns(keywords) {
+  const lines = GUIDE_FULL
   let turn = 0
   let last = null
   return (prompt) => {
@@ -70,6 +74,6 @@ export function makeGuideTurns(keywords) {
     if (!keywords.some((w) => text.includes(w))) return ''
     if (last !== null && turn - last < GUIDE_EVERY) return ''
     last = turn
-    return GUIDE_FULL
+    return lines
   }
 }

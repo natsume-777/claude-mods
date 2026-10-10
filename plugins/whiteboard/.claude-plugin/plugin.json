@@ -1,6 +1,6 @@
 {
   "name": "whiteboard",
-  "version": "0.9.2",
+  "version": "0.10.0",
   "description": "A whiteboard Claude writes to: titled Markdown cards (steps, running jobs, links) that stay put instead of scrolling away in the chat",
   "author": { "name": "Natsume777" },
   "types": "./types/index.d.ts",
@@ -8,7 +8,7 @@
     "handover": {
       "type": "boolean",
       "title": "前のセッションのボードを引き継ぐ",
-      "description": "ボードが空のとき、パネルに前のセッションのボードの一覧と [引き継ぐ] を出し、入力欄の上の帯にも一言足す。引き継いだ元のボードは、読み取り専用で残る。オフにすると、最初に打った言葉と会話の題も保存しない。オフでも、すでに読み取り専用になったボードは書き込めないまま",
+      "description": "ボードが空のとき、パネルに前のセッションのボードの一覧と [引き継ぐ] を出し、入力欄の上の帯にも一言足す。引き継いだ元のボードは、読み取り専用で残る。オフにすると、最初に打った言葉と会話の題も保存せず、Claude が前のセッションのボードを読むこと（list_cards の others）も断る。オフでも、すでに読み取り専用になったボードは書き込めないまま",
       "default": true
     },
     "guide": {
@@ -23,6 +23,36 @@
       "title": "full のきっかけの語",
       "description": "guide が full のとき、入力にこの語（カンマ区切り、大文字小文字は区別しない）のどれかが含まれると、ツールの使い分けの要点を足す（5 ターンに 1 回まで）",
       "default": "ボード,whiteboard"
+    },
+    "colors": {
+      "type": "string",
+      "title": "カードの色の割り当て",
+      "description": "カードの色の名前（red, orange, yellow, green, blue, purple, gray）に、見分けやすい色を割り当て直す。例: red=#D55E00, green=#009E73, blue=suggestion。値はテーマの色名か #rgb / #rrggbb。空なら、テーマに合わせた既定の色。色に決まった意味はない",
+      "default": ""
+    },
+    "styleMarks": {
+      "type": "boolean",
+      "title": "色に形の印を添える",
+      "description": "色の付いたカードの見出しに、色ごとに形の違う小さな印を付ける（帯に出る固定カードの題にも）。色だけでは見分けにくいときに使う。印は色の名前ごとに決まっていて、カードの色の割り当てを変えても変わらない",
+      "default": false
+    },
+    "bandTitle": {
+      "type": "boolean",
+      "title": "帯に固定カードの題を出す",
+      "description": "固定したカードがあるとき、入力欄の上の帯の「ホワイトボード N件」の後ろに、いちばん最近書き換えた固定カードの題（チェックリストがあれば進み具合も）を出す。幅が足りないときは省く",
+      "default": true
+    },
+    "staleHours": {
+      "type": "number",
+      "title": "古いカードの目安（時間）",
+      "description": "しばらく書き換えのないカードを「古い」と示す。固定していないカードを、この時間より長く書き換えていないと、パネルの見出しに「古い」と出て題が薄くなり、入力欄の上の帯にも枚数が出る。カードを勝手に消すことはない。0 にすると示さない",
+      "default": 3
+    },
+    "maxCards": {
+      "type": "number",
+      "title": "カードの上限（枚数）",
+      "description": "ボードに置けるカードの枚数の上限。多くすると、パネルが長くなり、保存も大きくなる。5〜40 で、小数は切り捨て、5 より小さいと 5、40 より大きいと 40、数でなければ 20 になる。減らしても、すでにあるカードは消えない（上限より多い間は、カードを足せない）",
+      "default": 20
     }
   }
 }
