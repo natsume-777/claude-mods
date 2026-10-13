@@ -29,6 +29,11 @@
       "name": "whiteboard",
       "source": "./plugins/whiteboard",
       "description": "A whiteboard Claude writes to: titled Markdown cards (steps, running jobs, links) that stay put instead of scrolling away in the chat"
+    },
+    {
+      "name": "usage-audit",
+      "source": "./plugins/usage-audit",
+      "description": "Audits past session transcripts for what weighs on your usage limits and suggests fixes, largest estimated saving first"
     }
   ]
 }

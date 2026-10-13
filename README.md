@@ -12,6 +12,7 @@ Claude Code の mod 集です。
 | [cache-timer](plugins/cache-timer/README.md) | プロンプトキャッシュが切れるまでの残り時間を、フッターのモデル名の左に表示する |
 | [usage-ledger](plugins/usage-ledger/README.md) | このセッションのトークンが何に使われているかを表示し、新しいセッションにしたほうが安くなる時期を知らせる。集計はファイルに書き出して Claude と相談できる |
 | [whiteboard](plugins/whiteboard/README.md) | Claude が書き込む作業ボード。手順・並行処理・リンクなど、チャットで流れてしまう情報をカードにして残す |
+| [usage-audit](plugins/usage-audit/README.md) | 過去のセッションの記録から、利用枠を重くしている箇所を見つけ、節約の見込みが大きい順に改善策を提案する |
 
 ## インストール
 

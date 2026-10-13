@@ -1,0 +1,6 @@
+{
+  "name": "usage-audit",
+  "version": "0.1.0",
+  "description": "Audits past session transcripts for what weighs on your usage limits and suggests fixes, largest estimated saving first",
+  "author": { "name": "Natsume777" }
+}
