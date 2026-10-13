@@ -47,9 +47,11 @@ export const inputKey = (gen) => (Number.isSafeInteger(gen) && gen > 0 ? 'search
 /** The view with the filter let go and the field drawn anew (a new key); the same view when there is no filter. */
 export const filterCleared = (view) => (view.filter == null ? view : { ...view, filter: null, searchGen: (Number.isSafeInteger(view.searchGen) ? view.searchGen : 0) + 1 })
 
+/** Whether the surface draws an Input (the search field's, and the board name's editor). */
+export const hasInput = (ui, surface) => typeof ui?.Input === 'function' && !NO_INPUT.has(surface)
+
 /** Whether the pane draws the field: enough cards, and an Input the surface draws. */
-export const hasSearch = (cards, ui, surface) =>
-  Array.isArray(cards) && cards.length >= SEARCH_MIN && typeof ui?.Input === 'function' && !NO_INPUT.has(surface)
+export const hasSearch = (cards, ui, surface) => Array.isArray(cards) && cards.length >= SEARCH_MIN && hasInput(ui, surface)
 
 /** Whether `text` narrows at all: one word or more. */
 export const isFiltering = (text) => queryTerms(text).length > 0

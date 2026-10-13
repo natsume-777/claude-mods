@@ -20,8 +20,8 @@ export const CARD_LIMIT = { default: 20, min: 5, max: 40 }
 
 /**
  * What the board holds at most; a call over a limit is refused with the reason. `cards` is the
- * default card limit only: the tools, the hand-over and the compaction note take the one the
- * setting gives (maxCardsOf) as an argument.
+ * default card limit only: the tools and the compaction note take the one the setting gives
+ * (maxCardsOf) as an argument.
  */
 export const LIMITS = {
   cards: CARD_LIMIT.default,
@@ -47,33 +47,19 @@ const limitOf = (n) => (Number.isSafeInteger(n) && n >= CARD_LIMIT.min && n <= C
 /** Ids are short and plain, so Claude can name a card again without guessing at its spelling. */
 export const ID_PATTERN = /^[A-Za-z0-9_-]+$/
 
-/** The $.store key a session's board is kept under. */
-export const storeKey = (sessionId) => 'board:' + sessionId
-
-// ---- The stored board: one record under `board:<id>`, written in one store write,
+// ---- The stored board: one record under `b:<boardId>` (boards.js), written in one store write,
 //   { v: 2, cards, rev, removed }
 // `cards` the cards (each may carry `prev`, see trackPrev), `rev` the board's revision, `removed`
 // the cards removed lately (undo_card). A board that became empty keeps its record (cards []), so
-// its revision goes on and its removed cards can still be brought back; the list of boards to take
-// over leaves out a board with no cards. Only a record with nothing in it (no cards, revision 0,
-// nothing removed) is not written: the key is deleted.
+// its revision goes on and its removed cards can still be brought back. Only a record with nothing
+// in it (no cards, revision 0, nothing removed) is not written: the key is deleted.
 //
 // Older boards: up to 0.9.2 the value was the cards alone (a list), and builds in between kept the
-// revision and the removed cards under keys of their own (LEGACY_KEYS). Such a board is read as it
-// is (readBoard); it is written in the new form at its next write, and those keys are deleted then.
-// Reading never rewrites it.
+// revision and the removed cards under keys of their own. migrate.js reads them with readBoard and
+// moves them to the record.
 
 /** The version of the stored record. */
 export const BOARD_VERSION = 2
-
-/** The keys an older build kept beside a board: its revision (a number) and its removed cards (a list). */
-export const LEGACY_KEYS = {
-  rev: (sessionId) => 'rev:' + sessionId,
-  removed: (sessionId) => 'removed:' + sessionId,
-}
-
-/** The prefixes of LEGACY_KEYS, for the store's size and the clean-up. */
-export const LEGACY_PREFIXES = ['rev:', 'removed:']
 
 /** Whether a stored value is the record (as opposed to an older board, a list of cards). */
 export const isBoardRecord = (value) => value != null && typeof value === 'object' && !Array.isArray(value) && value.v === BOARD_VERSION && Array.isArray(value.cards)
@@ -82,9 +68,9 @@ export const isBoardRecord = (value) => value != null && typeof value === 'objec
 export const boardCardsOf = (value) => sanitizeCards(isBoardRecord(value) ? value.cards : value)
 
 /**
- * A stored board as the tools use it: { cards, rev, removed, legacy }. `legacy` holds the values of
- * LEGACY_KEYS ({ rev, removed }, either undefined), read only for a board that is not a record;
- * `legacy` in the answer is true for such a board (its next write deletes those keys).
+ * A stored board as the tools use it: { cards, rev, removed, legacy }. `legacy` holds the values an
+ * older build kept beside the board ({ rev, removed }, either undefined), read only for a board that
+ * is not a record; `legacy` in the answer is true for such a board.
  */
 export function readBoard(value, legacy = {}) {
   const record = isBoardRecord(value)
@@ -100,7 +86,7 @@ export function boardRecord({ cards, rev, removed }) {
 }
 
 // ---- Revisions: every write that changes the board moves its revision on by one, and each card
-// it changed (added, rewritten, pinned, styled, copied in by a hand-over) carries that number as
+// it changed (added, rewritten, pinned, styled) carries that number as
 // `rev`. A removal moves the board's revision too. list_cards answers the board's revision, and its
 // `since` returns only the cards with a greater `rev`. The board's revision is the record's `rev`,
 // which an emptied board keeps.
@@ -126,7 +112,7 @@ const looksPart = (c) => ({ ...(c?.pinned === true ? { pinned: true } : {}), ...
 export const sameContent = (a, b) => a.title === b.title && a.body === b.body && (a.pinned === true) === (b.pinned === true) && styleOf(a) === styleOf(b)
 
 /**
- * The cards after a write, with their revisions: `after` is what a tool (or a hand-over) made of
+ * The cards after a write, with their revisions: `after` is what a tool made of
  * `before`, `rev` the board's revision before it. When a card is new or says something else than
  * it did, or a card is gone, the board moves to rev + 1 and each new or changed card carries it;
  * the others keep theirs. A write that changed nothing (the same card set again) keeps `rev`.
@@ -168,8 +154,8 @@ const isCard = (c) =>
  * is kept only as one of the styles (style.js); anything else is dropped (the card has none). `rev`
  * is kept only as a positive integer; a card without one reads as revision 0 and is not rewritten for it.
  * `prev` (the previous version, see trackPrev) is kept only when it is well-formed; a card without
- * one has nothing to undo. `arrivedAt` (when a hand-over copied the card in; stale.js) is kept only
- * as a number.
+ * one has nothing to undo. `arrivedAt` (when a 0.10.0 hand-over copied the card in; stale.js) is
+ * kept only as a number.
  */
 export function sanitizeCards(value) {
   if (!Array.isArray(value)) return []
@@ -186,7 +172,7 @@ export function sanitizeCards(value) {
 
 // ---- Undo: each card keeps one previous version as `prev` ({ title, body, pinned?, style? }), in
 // the store only: list_cards, the pane and the band never see it ($.state holds the cards without
-// it, shownCards), and a hand-over does not copy it. A card undo_card brought back from the removed
+// it, shownCards). A card undo_card brought back from the removed
 // ones has `prev: { gone: true }` instead (before it the card was not on the board), so that undo
 // on it again removes it: the redo. The cards removed lately are the record's `removed`.
 
@@ -212,7 +198,7 @@ export const shownCards = (cards) => cards.map(({ prev: _prev, ...rest }) => res
 /**
  * The cards after a write, each with its `prev`: a card that says something else than it did in
  * `before` keeps what it said there; one that says the same keeps the `prev` it had; a card that
- * was not in `before` has none (new, copied in by a hand-over), except a card undo_card brought
+ * was not in `before` has none (new), except a card undo_card brought
  * back, which keeps its `{ gone: true }`. undo_card's swap needs nothing more: the version it
  * brings back differs, so the one it replaced becomes the `prev`, and a second undo brings that back.
  */
@@ -606,15 +592,15 @@ export const COMPACTION_NOTE = { chars: 1500, minTitle: 8 }
  * The text added to the summary of a compaction, so the model still knows the board and what is on
  * it: a first line, then `- id: title` for each card in the pane's order (pinned first, marked
  * （固定）). Titles only; they are cut shorter, all alike, until the whole fits COMPACTION_NOTE.chars.
- * `sealed` adds that the board is read-only. At most `maxCards` cards (the setting, maxCardsOf).
- * '' for a board with no cards.
+ * `name` is the board's name, which the first line gives (the session is attached to it). At most
+ * `maxCards` cards (the setting, maxCardsOf). '' for a board with no cards.
  */
-export function compactionNote(cards, { sealed = false, maxCards } = {}) {
+export function compactionNote(cards, { name = '', maxCards } = {}) {
   if (!Array.isArray(cards) || cards.length === 0) return ''
   const ordered = orderedCards(cards).slice(0, limitOf(maxCards))
+  const which = typeof name === 'string' && name !== '' ? `このセッションがつないでいるボード「${cut(name.replace(/\s+/g, ' ').trim(), 40)}」` : 'このセッションがつないでいるボード'
   const head =
-    `（whiteboard）このセッションのボードに ${ordered.length} 枚のカードがあります` +
-    (sealed ? '（読み取り専用: 別のセッションに引き継がれたため、書き換えはできません）' : '') +
+    `（whiteboard）${which}に ${ordered.length} 枚のカードがあります` +
     '。続きの作業で必要なら mcp__whiteboard__list_cards で読めます（id を渡すとその 1 枚の本文）:'
   const lineOf = (c, max) => `- ${c.id}: ${cut(String(c.title).replace(/\s+/g, ' ').trim(), max)}${c.pinned === true ? '（固定）' : ''}`
   let text = ''
@@ -648,20 +634,24 @@ export function cells(text) {
 /** The cells a Button takes: its label in brackets on a terminal, inside a frame elsewhere (an estimate). */
 export const buttonCells = (surface, label) => cells(label) + (surface === 'terminal' ? 2 : 4)
 
-/** The line's label, "ホワイトボード 3件" (and "ホワイトボード 0件" while the board is empty). */
-export const countLabel = (count) => `${BOARD_NAME} ${count}件`
+/**
+ * The line's label, "ホワイトボード 3件" (and "ホワイトボード 0件" while the board is empty); the name
+ * alone for a session attached to no board (`count` null).
+ */
+export const countLabel = (count) => (count === null ? BOARD_NAME : `${BOARD_NAME} ${count}件`)
 
 // The line's last columns, which the terminal may draw over
 const RESERVED_COLUMNS = 2
 
-/** The band's label with its hint: "ホワイトボード 0件 · 引き継げます" ("ホワイトボード 3件" with none). */
+/** The band's label with its hint: "ホワイトボード · ボードを選ぶ" ("ホワイトボード 3件" with none). */
 export const bandLabel = (count, hint = '') => countLabel(count) + (hint !== '' ? ` · ${hint}` : '')
 
 /**
  * What the band draws in `columns`: { hasLabel, label, buttonLabel }. The wide form is the label
  * (the card count, and the hint after it when there is one) and a [開く] button after it. When
  * that does not fit, the button alone, carrying the count only (the hint is let go). With no
- * width known (0, absent), the wide form. The same at any count, 0 included.
+ * width known (0, absent), the wide form. The same at any count, 0 included; `count` null (no
+ * board attached) has the name without a count.
  */
 export function fitBand({ surface, columns, count, hint = '' }) {
   const label = bandLabel(count, hint)

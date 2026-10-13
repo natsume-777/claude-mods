@@ -1,27 +1,17 @@
-// The other sessions' boards as register.js finds them in $.store (pure: no $ here).
+// The boards as register.js finds them in $.store (pure: no $ here).
 //
-// register.js reads the store's keys and the values under the mod's own (`board:`, `meta:`, `seal:`,
-// and the `rev:` and `removed:` an older build kept beside a board); this turns them into what the
-// pane holds (the `others` value of $.state: the boards a new session may take over), and words
-// what the pane says after an action.
+// register.js reads the store's keys and the values under the mod's own (`b:`, `bm:`, `attach:`,
+// and any key of 0.10.0 still there); this turns them into the list the pane and list_boards show
+// (the `boards` value of $.state: a row per board whose meta is sound) and the store's size.
 
-import { sessionOfKey, summarizeBoard, candidatesOf, metaKey, sealKey, BOARD_PREFIX, META_PREFIX, SEAL_PREFIX } from './boards.js'
-import { LEGACY_PREFIXES, BOARD_NAME } from './board.js'
+import { BOARD_PREFIX, META_PREFIX, ATTACH_PREFIX, boardKey, boardOfMetaKey, summarizeBoard } from './boards.js'
+import { OLD_PREFIXES } from './migrate.js'
 
-// Every prefix of the mod's keys, each followed by a session id
-const PREFIXES = [BOARD_PREFIX, META_PREFIX, SEAL_PREFIX, ...LEGACY_PREFIXES]
+// Every prefix of the mod's keys
+const PREFIXES = [BOARD_PREFIX, META_PREFIX, ATTACH_PREFIX, ...OLD_PREFIXES]
 
-/** The `others` value when nothing is known yet. */
-export const NO_OTHERS = { boards: [], more: 0, bytes: 0, notice: '' }
-
-/** What the pane says when the board it was drawn from is not there any more. */
-export const goneText = () => `この${BOARD_NAME}は、もうありません（消されたか、片付けられました）`
-/** What the pane says when a button's board is not in the list the state holds (the list is old). */
-export const OLD_LIST = 'この一覧は古くなっています。もう一度開き直してください'
-/** What the pane says when the board was taken over by another session in the meantime. */
-export const ALREADY = (sealed) => `この${BOARD_NAME}は、すでに別のセッション（${sealed.toCwdName} · ID ${sealed.toSid8}）に引き継がれています`
-/** What the pane says when the board was taken over by this session already (the list is old). */
-export const alreadyMineText = () => `この${BOARD_NAME}は、すでにこのセッションに引き継いであります`
+/** The `boards` value when nothing is known yet. */
+export const NO_BOARDS = { owner: '', rows: [], bytes: 0, sig: '' }
 
 /** Whether two state values are the same (compared as JSON), so a write is made only when the value changed. */
 export const isSame = (a, b) => JSON.stringify(a) === JSON.stringify(b)
@@ -29,39 +19,44 @@ export const isSame = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 /** The JSON length of a stored value (0 for none). */
 export const sizeOf = (value) => (value === undefined ? 0 : JSON.stringify(value).length)
 
-// The session id of one of the mod's keys, or null for any other key
-const ownerOfKey = (key) => {
-  if (typeof key !== 'string') return null
-  const prefix = PREFIXES.find((p) => key.startsWith(p) && key.length > p.length)
-  return prefix === undefined ? null : key.slice(prefix.length)
-}
+/** Whether a key is one of the mod's own. */
+export const isMine = (key) => typeof key === 'string' && PREFIXES.some((p) => key.startsWith(p) && key.length > p.length)
 
-/** Whether a key is one of the mod's own (a board, a meta, a seal, or a key an older build kept beside a board). */
-export const isMine = (key) => ownerOfKey(key) !== null
+/** Whether a key is a board's meta. */
+export const isMetaKey = (key) => boardOfMetaKey(key) !== null
 
 /**
- * Every other session's board from the store's `keys` and a Map of their `values` (by key):
- * { entries: the summaries, bytes: the JSON length of all the other sessions' keys of the mod }.
- * The session `me` is left out; a key whose board is gone still counts for its size.
+ * A sign of the list from the store's `keys` and a Map of the metas' values (by key): it differs
+ * when a board came, went, or was written, renamed or retitled, so the list is read again only then.
  */
-export function scanEntries(me, keys, values) {
-  const entries = []
+export function listSigOf(keys, metas) {
+  const parts = []
+  for (const key of keys) {
+    if (!isMetaKey(key)) continue
+    const m = metas.get(key)
+    parts.push([key, m?.updatedAt, m?.name, m?.count, m?.lastTitle, m?.old === true])
+  }
+  return JSON.stringify(parts)
+}
+
+/** Whether a key is read for the list: a board's record or its meta (the attachments are not). */
+export const isListed = (key) => typeof key === 'string' && (key.startsWith(BOARD_PREFIX) || key.startsWith(META_PREFIX))
+
+/**
+ * Every board from the store's `keys` and a Map of their `values` (by key): { rows (boards.js
+ * summarizeBoard, in the store's order), bytes: the JSON length of the mod's keys whose values were
+ * read, sig: listSigOf of the same metas }.
+ */
+export function scanBoards(keys, values) {
+  const rows = []
   let bytes = 0
   for (const key of keys) {
-    const owner = ownerOfKey(key)
-    if (owner === null || owner === me) continue
+    if (!isMine(key)) continue
     bytes += sizeOf(values.get(key))
-    const sid = sessionOfKey(key)
-    if (sid !== null) entries.push(summarizeBoard(sid, values.get(key), values.get(metaKey(sid)), values.get(sealKey(sid))))
+    const id = boardOfMetaKey(key)
+    if (id === null) continue
+    const row = summarizeBoard(id, values.get(boardKey(id)), values.get(key))
+    if (row !== null) rows.push(row)
   }
-  return { entries, bytes }
-}
-
-/**
- * The `others` value for a scan: the boards that may be taken over (the first few, how many more
- * there are), the size, and the line about the last action. `handover` false leaves the boards out.
- */
-export function othersOf(scanned, { me, cwdName, notice = '', handover = true } = {}) {
-  const { boards, more } = handover ? candidatesOf(scanned.entries, { me, cwdName }) : { boards: [], more: 0 }
-  return { boards, more, bytes: scanned.bytes, notice }
+  return { rows, bytes, sig: listSigOf(keys, values) }
 }

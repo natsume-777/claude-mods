@@ -24,9 +24,8 @@ export function staleHoursOf(options) {
 /**
  * Whether a card is stale at `now`: the mark is on (`hours` > 0), the card is not pinned, not
  * marked 新規 / 更新 in the current turn (`marked`), and the later of its last write and the time it
- * came in by a hand-over (`arrivedAt`, boards.js planHandover) is more than `hours` hours before
- * `now`. So a card taken over from an old board is fresh on arrival, while it keeps its own time
- * for display. A card or a time that cannot be read is never stale.
+ * came in by a hand-over of 0.10.0 (`arrivedAt`, kept on the cards moved from it) is more than
+ * `hours` hours before `now`. A card or a time that cannot be read is never stale.
  */
 export function isStaleCard(card, now, hours, marked = false) {
   if (!(typeof hours === 'number' && hours > 0) || marked) return false

@@ -1,5 +1,6 @@
-// The values whiteboard keeps in $.state for the session. The cards are also kept in $.store,
-// keyed by the session id, so they outlive the app.
+// The values whiteboard keeps in $.state for the session. The boards are kept in $.store under
+// their own ids (`b:<id>`, `bm:<id>`), and which one a session is attached to under `attach:<sessionId>`,
+// so they outlive the app and the session.
 
 /**
  * One card on the board: `id` names it for Claude, `body` is Markdown, `updatedAt` epoch ms. The
@@ -10,7 +11,7 @@ export type WhiteboardCard = {
   title: string
   body: string
   updatedAt: number
-  /** Epoch ms a hand-over copied the card in (the stale mark counts from the later of this and `updatedAt`); absent otherwise. */
+  /** Epoch ms a hand-over of 0.10.0 copied the card in (the stale mark counts from the later of this and `updatedAt`); absent otherwise. */
   arrivedAt?: number
   /** True for a card fixed to the top of the pane; absent otherwise. */
   pinned?: true
@@ -23,60 +24,28 @@ export type WhiteboardCard = {
 /** A card changed since the person's latest prompt: new to the board, or changed (the lines added and removed since before the turn's first write to it). */
 export type WhiteboardRecentMark = { kind: 'new' } | { kind: 'changed'; added: number; removed: number }
 
-/** Another session's board as the pane's list of boards to take over shows it. */
-export type WhiteboardOtherBoard = {
-  /** The session's id (the store keys are `board:<sid>`, `meta:<sid>` and, once taken over, `seal:<sid>`). */
-  sid: string
-  /** Its first 8 plain characters: the buttons' keys (`peek-<sid8>`, `take-<sid8>`). */
-  sid8: string
-  /** Epoch ms the board was last written (the meta's, else the newest card's); null when neither is known. */
-  updatedAt: number | null
-  /** The last folder of the session root; 不明 when the board has no meta. */
+/** One board as the pane's list shows it (hooks/boards.js summarizeBoard). The id is never shown. */
+export type WhiteboardBoardRow = {
+  /** The board's id: the store keys are `b:<id>` (the cards) and `bm:<id>` (this row's meta); the buttons' keys (`attach-<id>`, `peek-<id>`). */
+  id: string
+  /** The board's name: Claude gives it, the person may change it. */
+  name: string
+  /** Epoch ms the board was last written (or made). */
+  updatedAt: number
+  /** Epoch ms the board was made (or moved from 0.10.0). */
+  createdAt: number
+  /** The last folder of the session root it was made under; 不明 when not known. */
   cwdName: string
-  /** The hash of the session root's full path the meta keeps (16 hex digits; the path itself is not kept); null when it has none. */
+  /** The hash of that root's full path (16 hex digits; the path itself is not kept); null when not known. */
   rootHash: string | null
   /** The cards the board holds. */
   count: number
-  /** The first three titles in the pane's order, cut to 60 characters. */
-  titles: string[]
-  /** Up to 20 titles in the pane's order, for the opened row. */
-  allTitles: { title: string; pinned: boolean }[]
-  /** How many of the cards are pinned. */
-  pinnedCount: number
-  /** The first request the person made in that session (60 characters at most); null for a board saved before it was kept. */
-  firstPrompt: string | null
-  /** The session's title, when the app handed it over; null otherwise. */
-  title: string | null
-  /** The seal (the `seal:<sid>` value; a 0.9.0 board has it in its meta). Set on a sealed board; such a board is never in the list of boards to take over. */
-  handedOver: { to: string; toSid8: string; toCwdName: string; at: number } | null
-}
-
-/** Where this session's cards came from, as the meta keeps it. */
-export type WhiteboardHandedFrom = {
-  sid: string
-  sid8: string
-  cwdName: string
-  updatedAt: number | null
-  count: number | null
-  /** Epoch ms of the hand-over. */
-  at: number
-}
-
-/** The confirmation step before a hand-over whose outcome is not plain. */
-export type WhiteboardConfirm = {
-  /** The board it is about. */
-  sid8: string
-  /** The cards of both boards when the plan was made; a different one means the plan is old. */
-  sig: string
-  plan: {
-    added: { id: string; title: string; pinned: boolean }[]
-    duplicates: { id: string; title: string; pinned: boolean }[]
-    overflow: { id: string; title: string; pinned: boolean }[]
-    /** The card limit the plan was made with (the setting `maxCards`). */
-    limit?: number
-  }
-  /** True when the plan was made again because the boards had changed. */
-  recounted: boolean
+  /** Every card's title in the pane's order (the pinned first), cut to 60 characters, with its checklist's progress ('' for none). */
+  titles: { title: string; pinned: boolean; progress: string }[]
+  /** The title (or 「the first request」) of the session that wrote the board last; null when not known. */
+  lastTitle: string | null
+  /** True for a board moved from a read-only (taken over) board of 0.10.0. */
+  old: boolean
 }
 
 declare module 'claude-code' {
@@ -86,28 +55,27 @@ declare module 'claude-code' {
       cards: WhiteboardCard[]
       /** The session id the `cards` belong to. The drawings take `cards` only when it is this session's (the process goes on under another id after /clear). */
       owner: string
-      /** The other sessions' boards in the store: the boards to take over (the first few, in order), how many more there are, the JSON size of all the other keys, and the line about the last action (or ''). Never stored. */
-      others: { boards: WhiteboardOtherBoard[]; more: number; bytes: number; notice: string }
+      /** The board the session `owner` is attached to (`board` its id, null for none; `name` its name, '' for none; `stamp` its meta's time of the last write as last read, 0 for none, so a read at a turn's boundary tells whether another session wrote it). The store keeps the attachment as `attach:<sessionId>`. */
+      attached: { owner: string; board: string | null; name: string; stamp: number }
+      /** Every board in the store (the list the pane shows), the JSON size of the mod's keys, and a sign of the boards' metas as read (the list is read again when it differs). Never stored. */
+      boards: { owner: string; rows: WhiteboardBoardRow[]; bytes: number; sig: string }
+      /** The session root as the session `owner` first saw it: its last folder and the hash of its full path (null when empty). Kept for the session's life, so a moved working folder does not move the boards to another project. Never stored. */
+      root: { owner: string; name: string; hash: string | null }
+      /** What the session `owner` is about: the title the app gives it, and the person's first request (60 characters at most); null when not known. The board's meta keeps it as `lastTitle`. Never stored. */
+      about: { owner: string; title: string | null; firstPrompt: string | null }
       /**
-       * `sealed`: set when another session took this board over (read-only here).
-       * `from`: where this session's cards came from. `last`: the line about the last hand-over
-       * or unsealing, until the pane is opened again. Never stored (the meta keeps the first two).
-       */
-      handover: {
-        sealed: { to: string; toSid8: string; toCwdName: string; at: number } | null
-        from: WhiteboardHandedFrom | null
-        last: { text: string } | null
-      }
-      /**
-       * The pane's own state: the board opened in the list (a short id, '' for none), whether the list is shown over cards, the confirmation step,
-       * and the person's fold choices on long cards for the session `owner` (by card id: opened or not, and the card's `rev` when chosen; null
+       * The pane's own state: the board opened in the list (an id, '' for none), whether the list of the other boards is shown below the cards,
+       * which folded groups of the list are shown, whether the board's name is being edited (and the editor's key, moved on at each opening),
+       * the person's fold choices on long cards for the session `owner` (by card id: opened or not, and the card's `rev` when chosen; null
        * until the first), the search field's text for the session `owner` (as typed; null when empty), and the count of the
        * field's clears (its key; a new key draws it anew, empty). Never stored.
        */
       view: {
         pick: string
         shown: boolean
-        confirm: WhiteboardConfirm | null
+        groups?: { others: boolean; old: boolean }
+        rename?: boolean
+        renameGen?: number
         folds?: { owner: string; cards: Record<string, { open: boolean; rev: number }> } | null
         filter?: { owner: string; text: string } | null
         searchGen?: number

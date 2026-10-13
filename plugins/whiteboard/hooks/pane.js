@@ -21,18 +21,15 @@
 // a dim 古い before the time on its meta line, its title dim instead of its colour and its border
 // dimmed (the rainbow's stripe is left out); it is only pointed out, never removed.
 //
-// Around the cards, the hand-over of an earlier session's board:
-//   - a board that was taken over (sealed) says it is read-only above its cards, with a button
-//     that makes it writable again;
-//   - the line about the last hand-over, and where the cards came from;
-//   - while the board is empty and other sessions' boards are there, the frame "前のセッション
-//     から引き継ぐ": one board opened, several as closed rows ([中身を見る] opens one); [引き継ぐ]
-//     copies its cards in, after a confirmation when the board already has cards or a card would
-//     be skipped (one whose id is taken);
-//   - with cards: a dim line with [表示] that opens the same frame.
-// Last, a line when the store is over half full.
+// The cards are those of the board the session is attached to (boards.js), under the board's name
+// as one Markdown heading (escaped, so it shows as typed); at the very bottom one row of the
+// board's tools ([別のボードへ], [名前を変える], [読み直す]), always shown. A session attached to no board has the list
+// instead of the cards: this project's boards newest first (name and time, the session that wrote
+// it last, the card titles, [つなぐ] and [中身を見る]), the other projects' and the old boards folded
+// under a line with [表示], [読み直す] at the bottom. A board's id is never shown. What an action did
+// is a toast (register.js), never a line in the pane. A line when the store is over half full.
 //
-// The band is one short line, the card count (and a hint: boards to take over, or read-only) with
+// The band is one short line, the card count (or, attached to no board, a hint to choose one) with
 // a button that opens the pane, drawn at 0 cards too. Cards changed since the person's latest
 // prompt add a dim `· 更新 N枚` after the count, stale cards a dim `· 古い N枚` after that. With a
 // pinned card (and the setting `bandTitle` on), the title of the pinned card written last follows
@@ -42,14 +39,14 @@
 // Nothing here calls $.ui.invalidate or draws on a timer (in the desktop app every redraw
 // rebuilds every mod's drawing, other mods' open panes included).
 
-import { LIMITS, BOARD_NAME, fitBand, fitBandTitle, fitBandRecent, fitBandStale, taskProgress } from './board.js'
+import { BOARD_NAME, fitBand, fitBandTitle, fitBandRecent, fitBandStale, taskProgress } from './board.js'
 import { markLabel, diffLine } from './recent.js'
 import { isFoldable, isFolded, foldCut, foldLabel, revOfCard } from './fold.js'
 import { mermaidSvg, splitFences } from './mermaid.js'
 import { RAINBOW, DEFAULT_PALETTE, colorOf, shapeOf } from './style.js'
-import { stampOf, dayStampOf, cardStampOf, storeWarning, originText } from './boards.js'
+import { dayStampOf, cardStampOf, storeWarning, groupBoards, titlesLine, UNKNOWN_FOLDER } from './boards.js'
 import { isStaleCard, STALE_LABEL } from './stale.js'
-import { SEARCH_PLACEHOLDER, SEARCH_CLEAR, SEARCH_NONE, searchCount, hasSearch, isFiltering, filterCards, inputKey } from './search.js'
+import { SEARCH_PLACEHOLDER, SEARCH_CLEAR, SEARCH_NONE, searchCount, hasSearch, hasInput, isFiltering, filterCards, inputKey } from './search.js'
 import { ORDER_LABELS, hasOrder, sortCards } from './order.js'
 
 // The pane's title is the board's name (board.js BOARD_NAME), given where register.js opens it
@@ -227,7 +224,7 @@ function drawCards(ui, cards, view, actions) {
   // The order button (order.js): with enough cards; with fewer the added order is drawn
   const ordering = hasOrder(cards)
   const by = ordering && view.order === 'updated' ? 'updated' : 'added'
-  const count = Text({ dimColor: true, wrap: 'wrap', children: [`${cards.length} 件 · 書き換えは Claude に頼んでください`] })
+  const count = Text({ dimColor: true, wrap: 'wrap', children: [`${cards.length} 件`] })
   return [
     Box({
       key: 'about',
@@ -279,205 +276,163 @@ function drawSearch(ui, gen, count, actions) {
   return Box({ key: 'search', flexDirection: 'column', children })
 }
 
-// ---- The hand-over
+// ---- The board's name, and the list of boards
 
 const boxed = (key, children) => ({ key, flexDirection: 'column', rowGap: 1, width: '100%', borderStyle: 'round', borderDimColor: true, paddingX: 1, children })
 
-// A board that was taken over by another session: read-only here
-function drawSealed(ui, sealed, actions) {
+// A text as Markdown shows it literally: line breaks and blanks as one blank, every ASCII
+// punctuation mark escaped with a backslash (CommonMark lets any of them be escaped)
+export const markdownLiteral = (text) => String(text ?? '').replace(/\s+/g, ' ').replace(/[!-/:-@[-`{-~]/g, (ch) => '\\' + ch)
+
+// A heading (`## …`): the one way the pane has to draw text larger than the cards' (Text has no size)
+const heading = (ui, key, text) => ui.Markdown({ key, text: '## ' + markdownLiteral(text) })
+
+// The name of the board the session is attached to: one heading above the cards
+function drawBoardName(ui, attached) {
+  return heading(ui, 'board-name', attached.name)
+}
+
+// One board in the list: its name and time, the session that wrote it last, its card titles (all
+// of them once opened), [つなぐ] and [中身を見る]. `folder` adds the folder for another project's.
+function drawBoardRow(ui, row, { open, folder, now }, actions) {
   const { Box, Text, Button } = ui
-  return Box(
-    boxed('sealed', [
-      Text({ bold: true, children: ['読み取り専用'] }),
-      Text({
-        wrap: 'wrap',
-        children: [`この${BOARD_NAME}は ${stampOf(sealed.at)} に、別のセッション（${sealed.toCwdName} · ID ${sealed.toSid8}）へ引き継ぎました。ここでは読むだけで、Claude も書き込めません。`],
-      }),
-      Box({ key: 'sealed-buttons', flexDirection: 'row', children: [Button({ key: 'unseal', label: 'このセッションで書けるように戻す', variant: 'secondary', onPress: () => actions.unseal() })] }),
-      Text({ dimColor: true, wrap: 'wrap', children: ['戻しても、引き継ぎ先のカードはそのまま残ります。'] }),
-    ]),
-  )
-}
-
-// The line about the last hand-over or unsealing (until the pane is opened again)
-function drawLast(ui, last) {
-  const { Box, Text } = ui
-  return Box(boxed('handover-last', [Box({ key: 'handover-last-text', children: [Text({ wrap: 'wrap', children: [last.text] })] })]))
-}
-
-// Where the cards on this board came from, for as long as the board keeps the record
-function drawFrom(ui, from, now) {
-  const { Box, Text } = ui
-  const when = typeof from.updatedAt === 'number' ? dayStampOf(from.updatedAt, now) : '時刻不明'
-  return Box({
-    key: 'handover-from',
-    children: [Text({ dimColor: true, wrap: 'wrap', children: [`引き継ぎ元: ${when} · ${from.cwdName} · ID ${from.sid8}（元の${BOARD_NAME}は、そのセッションを開くと読めます）`] })],
-  })
-}
-
-// The first line of a board's block: when, which folder, how many cards, the id's start
-function drawBoardHead(ui, b, now) {
-  const { Box, Text } = ui
-  return Box({
-    key: keyOf('cand-head', b.sid8),
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    columnGap: 2,
-    children: [
-      Text({ dimColor: true, children: [typeof b.updatedAt === 'number' ? dayStampOf(b.updatedAt, now) : '時刻不明'] }),
-      Text({ bold: true, wrap: 'wrap', children: [b.cwdName] }),
-      Text({ dimColor: true, children: [`${b.count} 枚`] }),
-      Text({ dimColor: true, children: [`ID ${b.sid8}`] }),
-    ],
-  })
-}
-
-// The second line: what the session was about (its title, else the first thing typed in it)
-const aboutOf = (b) => (b.title !== null ? b.title : b.firstPrompt !== null ? `「${b.firstPrompt}」` : '最初に打った言葉: 不明')
-
-function drawBoardRow(ui, b, { open, single, hasCards, now }, actions) {
-  const name = BOARD_NAME
-  const { Box, Text, Button } = ui
-  const children = [drawBoardHead(ui, b, now), Box({ key: keyOf('cand-about', b.sid8), children: [Text({ dimColor: true, wrap: 'wrap', children: [aboutOf(b)] })] })]
-  if (open) {
+  const head = [
+    Text({ bold: true, wrap: 'wrap', children: [row.name] }),
+    ...(folder ? [Text({ dimColor: true, wrap: 'wrap', children: [row.cwdName] })] : []),
+    Text({ dimColor: true, children: [typeof row.updatedAt === 'number' ? dayStampOf(row.updatedAt, now) : '時刻不明'] }),
+  ]
+  const children = [Box({ key: keyOf('row-head', row.id), flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: head })]
+  if (row.lastTitle) children.push(Box({ key: keyOf('row-about', row.id), children: [Text({ dimColor: true, wrap: 'wrap', children: [`最後に書いたセッション: ${row.lastTitle}`] })] }))
+  if (open && row.titles.length > 0) {
     children.push(
       Box({
-        key: keyOf('cand-titles', b.sid8),
+        key: keyOf('row-titles', row.id),
         flexDirection: 'column',
-        children: b.allTitles.map((t) => Text({ wrap: 'wrap', children: [`・${t.title}${t.pinned ? '（固定）' : ''}`] })),
-      }),
-      Box({
-        key: keyOf('cand-note', b.sid8),
-        flexDirection: 'column',
-        children: [
-          Text({
-            dimColor: true,
-            wrap: 'wrap',
-            children: [
-              hasCards
-                ? `今の${name}のカードの後ろに足します。入る枚数は、押したあとの確認で分かります。`
-                : `この${name}に ${b.count} 枚が入ります${b.pinnedCount > 0 ? `（固定の ${b.pinnedCount} 枚も固定のまま）` : ''}。`,
-            ],
-          }),
-          Text({ dimColor: true, wrap: 'wrap', children: [`元の${name}は読み取り専用になり、この一覧から消えます。`] }),
-        ],
+        children: row.titles.map((t) => Text({ wrap: 'wrap', children: [`・${t.title}${t.pinned ? '（固定）' : ''}${t.progress !== '' ? ' ' + t.progress : ''}`] })),
       }),
     )
   } else {
-    const rest = b.count - b.titles.length
-    children.push(
-      Box({ key: keyOf('cand-titles', b.sid8), children: [Text({ dimColor: true, wrap: 'wrap', children: [b.titles.join(' / ') + (rest > 0 ? ` ほか ${rest} 枚` : '')] })] }),
-    )
+    children.push(Box({ key: keyOf('row-titles', row.id), children: [Text({ dimColor: true, wrap: 'wrap', children: [titlesLine(row)] })] }))
   }
-  const take = Button({ key: 'take-' + b.sid8, label: '引き継ぐ', variant: 'secondary', onPress: () => actions.take(b.sid8) })
-  const buttons = single ? [take] : [Button({ key: 'peek-' + b.sid8, label: open ? '閉じる' : '中身を見る', variant: 'secondary', onPress: () => actions.peek(b.sid8) }), take]
-  children.push(Box({ key: keyOf('cand-buttons', b.sid8), flexDirection: 'row', columnGap: 1, children: buttons }))
-  return Box({ key: keyOf('cand', b.sid8), flexDirection: 'column', children })
+  const buttons = [Button({ key: keyOf('attach', row.id), label: 'つなぐ', variant: 'secondary', onPress: () => actions.attach?.(row.id) })]
+  if (row.count > 0) buttons.push(Button({ key: keyOf('peek', row.id), label: open ? '閉じる' : '中身を見る', variant: 'secondary', onPress: () => actions.peek?.(row.id) }))
+  children.push(Box({ key: keyOf('row-buttons', row.id), flexDirection: 'row', columnGap: 1, children: buttons }))
+  return Box({ ...boxed(keyOf('row', row.id), children), rowGap: 0 })
 }
 
-// The step before a hand-over whose outcome is not plain: what goes in, what is skipped, what does not fit
-function drawConfirm(ui, b, confirm, now, actions) {
+// A folded group (the other projects' boards, the old boards): its name and count with [表示] /
+// [隠す], and its rows while it is shown
+function drawGroup(ui, name, label, rows, open, { now, pick, folder }, actions) {
   const { Box, Text, Button } = ui
-  const name = BOARD_NAME
-  const { added, duplicates, overflow } = confirm.plan
-  // The card limit the plan was made with (the setting `maxCards`); a step staged before it was kept: the default
-  const limit = Number.isSafeInteger(confirm.plan.limit) ? confirm.plan.limit : LIMITS.cards
-  // By title only: a card's id is Claude's name for it and is not shown in the pane
-  const entries = (list, key) => Box({ key, flexDirection: 'column', children: list.map((c) => Text({ wrap: 'wrap', children: [`  ・${c.title}`] })) })
-  const pinned = added.filter((c) => c.pinned).length
-  const children = [Text({ bold: true, children: ['引き継ぐ前に確認してください'] })]
-  if (confirm.recounted) children.push(Text({ wrap: 'wrap', children: [`${name}が変わったので、数え直しました`] }))
-  children.push(Text({ wrap: 'wrap', children: [`${originText(b, now)} · ${b.count} 枚 · ID ${b.sid8} から`] }))
-  if (added.length > 0) {
-    children.push(Text({ wrap: 'wrap', children: [`入る: ${added.length} 枚`] }))
-    if (pinned > 0) children.push(Text({ dimColor: true, wrap: 'wrap', children: [`固定の ${pinned} 枚も固定のまま入ります`] }))
-  }
-  if (duplicates.length > 0) {
-    children.push(Text({ wrap: 'wrap', children: [`飛ばす: ${duplicates.length} 枚（今の${name}か最近消したカードに、同じカードがあるため。今のカードはそのまま）`] }), entries(duplicates, 'confirm-skipped'))
-  }
-  if (overflow.length > 0) {
-    children.push(Text({ wrap: 'wrap', children: [`入らない: ${overflow.length} 枚（カードは ${limit} 枚まで）`] }), entries(overflow, 'confirm-overflow'))
-    children.push(Text({ dimColor: true, wrap: 'wrap', children: [`入らなかったカードは元の${name}に残り、そのセッションを開けば読めます。`] }))
-  }
-  const buttons = []
-  if (added.length > 0) {
-    buttons.push(Button({ key: 'take-confirm', label: 'この内容で引き継ぐ', variant: 'secondary', onPress: () => actions.takeConfirm() }))
-  } else {
-    // Nothing would go in: say why, and leave only the way out
-    const why =
-      overflow.length > 0
-        ? `今の${name}は ${limit} 枚でいっぱいなので、1 枚も入りません。済んだカードを消してから引き継いでください`
-        : `入るカードが 1 枚もありません（すべて、今の${name}か最近消したカードに同じカードがあります）`
-    children.push(Text({ wrap: 'wrap', children: [why] }))
-  }
-  buttons.push(Button({ key: 'take-cancel', label: 'やめる', variant: 'secondary', onPress: () => actions.takeCancel() }))
-  children.push(Box({ key: 'confirm-buttons', flexDirection: 'row', columnGap: 1, children: buttons }))
-  return Box(boxed('confirm', children))
-}
-
-// The frame "前のセッションから引き継ぐ": the boards that may be taken over
-function drawHandover(ui, others, hasCards, view, now, actions) {
-  const { Box, Text } = ui
-  const name = BOARD_NAME
-  const single = others.boards.length === 1
-  const rows = others.boards.flatMap((b) => {
-    const row = drawBoardRow(ui, b, { open: single || view.pick === b.sid8, single, hasCards, now }, actions)
-    return view.confirm !== null && view.confirm.sid8 === b.sid8 ? [row, drawConfirm(ui, b, view.confirm, now, actions)] : [row]
-  })
-  return Box(
-    boxed('handover', [
-      Text({ bold: true, children: ['前のセッションから引き継ぐ'] }),
-      Text({ dimColor: true, wrap: 'wrap', children: [`前のセッションの${name}のカードを、この${name}に写します。元の${name}は消えずに残り、読み取り専用になります。`] }),
-      ...(others.notice !== '' ? [Box({ key: 'handover-notice', children: [Text({ wrap: 'wrap', children: [others.notice] })] })] : []),
-      ...rows,
-      ...(others.more > 0 ? [Box({ key: 'handover-more', children: [Text({ dimColor: true, children: [`ほか ${others.more} 件`] })] })] : []),
-    ]),
-  )
-}
-
-// With cards on the board: one dim line and a button that opens the frame
-function drawEntry(ui, others, view, actions) {
-  const { Box, Text, Button } = ui
-  return Box({
-    key: 'handover-entry',
+  if (rows.length === 0) return []
+  const line = Box({
+    key: 'group-' + name,
     flexDirection: 'row',
     flexWrap: 'wrap',
     columnGap: 2,
     alignItems: 'center',
-    children: [
-      Text({ dimColor: true, wrap: 'wrap', children: [`前のセッションの${BOARD_NAME}を引き継ぐこともできます（${others.boards.length + others.more} 件）`] }),
-      Button({ key: 'show-handover', label: view.shown ? '隠す' : '表示', variant: 'secondary', onPress: () => actions.toggleShown() }),
-    ],
+    children: [Text({ wrap: 'wrap', children: [`${label}（${rows.length}）`] }), Button({ key: 'show-' + name, label: open ? '隠す' : '表示', variant: 'secondary', onPress: () => actions.group?.(name, !open) })],
   })
+  return [line, ...(open ? rows.map((r) => drawBoardRow(ui, r, { open: pick === r.id, folder: folder(r), now }, actions)) : [])]
 }
 
 /**
- * The pane's tree. `data` is what register.js read from $.state: { cards, others, handover:
- * { sealed, from, last }, view: { pick, shown, confirm, searchGen (search.js inputKey) }, enabled (the setting `handover`),
- * now, palette (style.js), marks (recent.js: the cards changed since the
- * person's latest prompt, by id), folds (fold.js: the person's fold choices, by id), filter
- * (search.js: the search field's text, '' for none), order (order.js: 'added' or 'updated'), ownBytes
- * (the JSON size of this session's keys as stored, the cards' previous versions and the removed
- * cards included; null when unknown, the shown cards are counted then), staleHours (stale.js: the
- * setting, 0 for off), shapes (style.js: the setting `styleMarks`) }; `where` is
- * { surface, columns }; `actions` the Buttons' work.
+ * The list of boards to attach to: this project's newest first, then the other projects' and the
+ * old boards, each folded under a line with [表示]. `except` (a board id or null) is left out: the
+ * board the session is attached to. `reload` puts [読み直す] at its bottom (attached to none; when
+ * attached it is in the board's tools). Answers the blocks.
+ */
+function drawChooser(ui, { rows, root, except, title, view, now, reload = false }, actions) {
+  const { Box, Text } = ui
+  const groups = groupBoards(rows, { rootHash: root?.hash ?? null, except })
+  const where = root?.name ?? UNKNOWN_FOLDER
+  // Attached to none the list is the whole pane, and its title a heading; in the board's tools, a bold line
+  const blocks = [reload ? heading(ui, 'chooser-heading', title) : Text({ bold: true, wrap: 'wrap', children: [title] })]
+  if (groups.mine.length > 0) {
+    blocks.push(Text({ wrap: 'wrap', children: [`このプロジェクト（${where}）のボード`] }))
+    for (const r of groups.mine) blocks.push(drawBoardRow(ui, r, { open: view.pick === r.id, folder: false, now }, actions))
+  } else {
+    blocks.push(Text({ wrap: 'wrap', children: [`このプロジェクト（${where}）のボードは、まだありません`] }))
+  }
+  blocks.push(...drawGroup(ui, 'others', 'ほかのプロジェクトのボード', groups.others, view.groups.others, { now, pick: view.pick, folder: () => true }, actions))
+  blocks.push(...drawGroup(ui, 'old', '古いボード', groups.old, view.groups.old, { now, pick: view.pick, folder: (r) => r.rootHash !== (root?.hash ?? null) }, actions))
+  blocks.push(Text({ dimColor: true, wrap: 'wrap', children: [`新しい${BOARD_NAME}は、Claude に「◯◯のボードを作って」と頼むとできます`] }))
+  if (reload) blocks.push(Box({ key: 'chooser-foot', flexDirection: 'row', children: [reloadButton(ui, actions)] }))
+  return [Box({ key: 'chooser', flexDirection: 'column', rowGap: 1, width: '100%', children: blocks })]
+}
+
+// [読み直す]: the board and the list from the store now (another session may have written them)
+const reloadButton = (ui, actions) => ui.Button({ key: 'reload', label: '読み直す', variant: 'secondary', onPress: () => actions.reload?.() })
+
+// The board's tools, at the very bottom of an attached pane: one row of three secondary buttons,
+// always shown, each saying what it does: [別のボードへ], [名前を変える] (left out where no Input is
+// drawn) and [読み直す]. [名前を変える] puts an Input in the row's place (drawn under a new key each
+// time, so it starts empty) with [やめる]; [別のボードへ] puts the list of the other boards there,
+// with [やめる] at its bottom. A rename that is done, or a board attached to, brings the row back.
+function drawTools(ui, attached, view, canInput, chooser, actions) {
+  const { Box, Button, Input } = ui
+  const cancel = (key, onPress) => Box({ key: key + '-row', flexDirection: 'row', children: [Button({ key, label: 'やめる', variant: 'secondary', onPress })] })
+  if (view.rename && canInput) {
+    const key = 'rename-input' + (view.renameGen > 0 ? '-' + view.renameGen : '')
+    return [
+      Box({
+        key: 'board-tools',
+        flexDirection: 'column',
+        rowGap: 1,
+        width: '100%',
+        children: [Input({ key, label: '新しい名前', placeholder: attached.name, submitLabel: '変える', onSubmit: (value) => actions.rename?.(value) }), cancel('rename-cancel', () => actions.renameCancel?.())],
+      }),
+    ]
+  }
+  if (view.shown) {
+    return [Box(boxed('board-tools', [...chooser(attached.board, '切り替えるボードを選ぶ'), cancel('switch-cancel', () => actions.toggleShown?.())]))]
+  }
+  return [
+    Box({
+      key: 'board-tools',
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      columnGap: 1,
+      children: [
+        Button({ key: 'switch', label: '別のボードへ', variant: 'secondary', onPress: () => actions.toggleShown?.() }),
+        ...(canInput ? [Button({ key: 'rename', label: '名前を変える', variant: 'secondary', onPress: () => actions.renameOpen?.() })] : []),
+        reloadButton(ui, actions),
+      ],
+    }),
+  ]
+}
+
+/**
+ * The pane's tree. `data` is what register.js read from $.state: { attached ({ board, name }, board
+ * null for a session attached to no board), cards, boards: { rows, bytes } (view-state.js boardsOf),
+ * root ({ name, hash } or null), view (view-state.js viewOf), now, palette (style.js), marks
+ * (recent.js: the cards changed since the person's latest prompt, by id), folds (fold.js: the
+ * person's fold choices, by id), filter (search.js: the search field's text, '' for none), order
+ * (order.js: 'added' or 'updated'), staleHours (stale.js: the setting, 0 for off), shapes (style.js:
+ * the setting `styleMarks`) }; `where` is { surface, columns }; `actions` the Buttons' work.
+ *
+ * Only what the board is for: attached, the board's name as one heading, then the cards, and at
+ * the very bottom one row of the board's tools, each saying what it does (drawTools). Not attached: the list, to choose
+ * one ([つなぐ]), with [読み直す] at its bottom. What an action did is said in a toast, never in the
+ * pane. The one line kept beside the cards is the warning that the store is over half full: it is
+ * a lasting state the person has to act on, not a report. It comes above the tools.
  */
 export function drawPane(ui, data, where, actions) {
-  const { cards, others, handover, view, enabled, now, palette, marks = {}, folds = {}, filter = '', order = 'added', ownBytes = null, staleHours = 0, shapes = false } = data
+  const { attached, cards, boards, root = null, view, now, palette, marks = {}, folds = {}, filter = '', order = 'added', staleHours = 0, shapes = false } = data
   const { Box, Text } = ui
-  const sealed = handover.sealed !== null
-  const offered = enabled && !sealed
-  const warning = storeWarning(others.bytes + (typeof ownBytes === 'number' ? ownBytes : JSON.stringify(cards).length))
-  const children = [
-    ...(sealed ? [drawSealed(ui, handover.sealed, actions)] : []),
-    ...(handover.last !== null ? [drawLast(ui, handover.last)] : []),
-    ...(handover.from !== null ? [drawFrom(ui, handover.from, now)] : []),
-    ...drawCards(ui, cards, { ...where, now, palette, marks, folds, filter, order, searchGen: view.searchGen ?? 0, staleHours, shapes }, actions),
-    ...(offered && cards.length === 0 && (others.boards.length > 0 || others.notice !== '') ? [drawHandover(ui, others, false, view, now, actions)] : []),
-    ...(offered && cards.length > 0 && (others.boards.length > 0 || view.shown) ? [drawEntry(ui, others, view, actions)] : []),
-    ...(offered && cards.length > 0 && view.shown ? [drawHandover(ui, others, true, view, now, actions)] : []),
-    ...(warning !== '' ? [Box({ key: 'store-warning', children: [Text({ dimColor: true, wrap: 'wrap', children: [warning] })] })] : []),
-  ]
+  const warning = storeWarning(boards.bytes)
+  const canInput = hasInput(ui, where.surface)
+  const isAttached = attached !== null && attached.board !== null
+  const chooser = (except, title) => drawChooser(ui, { rows: boards.rows, root, except, title, view, now, reload: except === null }, actions)
+  const warn = warning !== '' ? [Box({ key: 'store-warning', children: [Text({ dimColor: true, wrap: 'wrap', children: [warning] })] })] : []
+  const children = isAttached
+    ? [
+        drawBoardName(ui, attached),
+        ...drawCards(ui, cards, { ...where, now, palette, marks, folds, filter, order, searchGen: view.searchGen ?? 0, staleHours, shapes }, actions),
+        ...warn,
+        ...drawTools(ui, attached, view, canInput, chooser, actions),
+      ]
+    : [...chooser(null, 'つなぐボードを選ぶ'), ...warn]
   return ui.Box({ key: 'whiteboard', flexDirection: 'column', rowGap: 1, paddingX: 1, width: '100%', children })
 }
 

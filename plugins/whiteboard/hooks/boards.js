@@ -1,49 +1,46 @@
-// The boards other sessions left in $.store, and what is done with them (pure: no $ here, shelf.js
-// and store.js keep the calls).
+// The named boards in $.store and which one a session is attached to (pure: no $ here, register.js
+// keeps the calls).
 //
-// A session's board is `board:<sessionId>` (the cards, with the board's revision and the removed
-// cards; board.js) beside `meta:<sessionId>`, written together:
-//   { updatedAt, cwdName, count }              always
-//   rootHash                                   a hash of the session root's full path (rootHashOf;
-//                                              the path itself is not kept): list_cards' `others`
-//                                              reads only the boards with this session's
-//   firstPrompt, title                         what the session began with (to tell boards apart)
-//   handedFrom: { sid, sid8, cwdName, updatedAt, count, at }
-//                                              set on the board that took cards over
-// and, only once the board was taken over, `seal:<sessionId>`:
-//   { to, toSid8, toCwdName, at }              the board is sealed (read-only); the cards under
-//                                              `board:` are never touched
-// The seal has a key of its own because the meta is read, laid over and written back by the session
-// that owns the board at every save: a seal kept in it could be written back away. Only the session
-// that took the board over writes the seal key, and only [このセッションで書けるように戻す] deletes it.
-// 0.9.0 kept the seal in the meta as `handedOver`; that is still read as a seal (never written).
-// A new session's pane lists the other boards, so it can copy one over; the copied board stays,
-// sealed.
+// A board belongs to no session. It is two keys, under its own id (made when it is created, or
+// `s-<sessionId>` for a board moved from 0.10.0, migrate.js):
+//   b:<boardId>    the cards, with the board's revision and the cards removed lately (board.js);
+//                  absent while there is nothing to keep
+//   bm:<boardId>   { name, rootHash?, cwdName, createdAt, updatedAt, count, lastTitle?, lastSid?, old? }
+//                  the board's name (Claude gives it, the person may change it), a hash of the
+//                  session root's full path it was made under (rootHashOf; the path itself is not
+//                  kept) with that root's last folder, when it was made and last written, its card
+//                  count, the title of the session that wrote it last (with that session's id,
+//                  `lastSid`, so a title the app gives that session later replaces its own title
+//                  only), and `old` for a board moved from a read-only 0.10.0 board. A board is listed when its meta is there.
+// A session's attachment is `attach:<sessionId>` ({ board, at }): the same session opened again is
+// still attached. A new session is attached to nothing. Several sessions may be attached to one board.
+//
+// The prefixes differ from 0.10.0's (`board:`, `meta:`, `seal:`), so an old key is never read as a new one.
 
-import { LIMITS, CARD_LIMIT, BOARD_NAME, boardCardsOf, orderedCards, clockOf } from './board.js'
+import { BOARD_NAME, boardCardsOf, orderedCards, clockOf, taskProgress } from './board.js'
 
 // The engine clips a long text and appends this marker
 const CLIP_MARKER = /\.\.\. \[\+\d+ chars\]\s*$/
 
 /** One line of a text: blanks folded, the engine's "... [+N chars]" marker made …, cut to `max` characters with a trailing …. */
-function clip(value, max = 60) {
+export function clip(value, max = 60) {
   const line = (typeof value === 'string' ? value : '').replace(CLIP_MARKER, '…').replace(/\s+/g, ' ').trim()
   const chars = [...line]
   return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : line
 }
 
-/** What the list shows and keeps at most. */
-export const SHELF_LIMITS = {
-  boards: 5,
+/** What a list row shows and keeps at most. */
+export const LIST_LIMITS = {
+  /** The titles a closed row shows. */
   titles: 3,
+  /** The characters of a title, of a session's title or first request. */
   title: 60,
-  /** The titles an opened row lists: every card a board can hold, whatever limit it was written under. */
-  openTitles: CARD_LIMIT.max,
-  /** The characters of the first request that are kept. */
-  prompt: 60,
 }
 
-/** The word for a folder that is not known (a board saved before the meta existed). */
+/** The most characters of a board's name. */
+export const NAME_LIMIT = 40
+
+/** The word for a folder that is not known. */
 export const UNKNOWN_FOLDER = '不明'
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -53,31 +50,22 @@ const MIB = 1024 * 1024
 export const WARN_BYTES = 2 * MIB
 const STORE_MIB = 4
 
-// ---- The options
+// ---- The keys
 
-let config = { handover: true }
+export const BOARD_PREFIX = 'b:'
+export const META_PREFIX = 'bm:'
+export const ATTACH_PREFIX = 'attach:'
+export const boardKey = (boardId) => BOARD_PREFIX + boardId
+export const metaKey = (boardId) => META_PREFIX + boardId
+export const attachKey = (sessionId) => ATTACH_PREFIX + sessionId
 
-/** Takes register()'s options: `handover` is on unless it is false. */
-export function setConfig(options = {}) {
-  config = { handover: options?.handover !== false }
-  return config
-}
+/** The board id of a `bm:` key, or null for any other key. */
+export const boardOfMetaKey = (key) => (typeof key === 'string' && key.startsWith(META_PREFIX) && key.length > META_PREFIX.length ? key.slice(META_PREFIX.length) : null)
 
-export const getConfig = () => config
+/** A new board's id from the time and a random number in [0, 1): `n-<time>-<random>`, plain characters only. */
+export const newBoardId = (now, random) => 'n-' + Math.max(0, Math.floor(now)).toString(36) + '-' + Math.floor(random * 36 ** 6).toString(36).padStart(6, '0')
 
-// ---- The keys and the meta
-
-export const BOARD_PREFIX = 'board:'
-export const metaKey = (sessionId) => 'meta:' + sessionId
-export const SEAL_PREFIX = 'seal:'
-export const META_PREFIX = 'meta:'
-export const sealKey = (sessionId) => SEAL_PREFIX + sessionId
-
-/** The session id of a `board:` key, or null for any other key. */
-export const sessionOfKey = (key) => (typeof key === 'string' && key.startsWith(BOARD_PREFIX) && key.length > BOARD_PREFIX.length ? key.slice(BOARD_PREFIX.length) : null)
-
-/** The first 8 plain characters of a session id: the buttons' keys and list_cards' `board`. */
-export const shortId = (sessionId) => String(sessionId ?? '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 8) || 'session'
+// ---- The root
 
 /** The last folder of a path, nothing above it; UNKNOWN_FOLDER when there is none. */
 export function cwdNameOf(path) {
@@ -114,59 +102,55 @@ export function rootHashOf(path) {
   return h.toString(16).padStart(16, '0')
 }
 
+/** The root a session keeps for its whole life (register.js fixes it at the first look): { name, hash }. */
+export const rootOf = (path) => ({ name: cwdNameOf(path), hash: rootHashOf(path) })
+
 const ROOT_HASH = /^[0-9a-f]{16}$/
 
-/** A request cut to the length the meta keeps: blanks and line breaks as one blank, `…` at the cut. */
-export const promptLine = (text, max = SHELF_LIMITS.prompt) => clip(text, max)
+// ---- The values
 
 const isNum = (n) => typeof n === 'number' && Number.isFinite(n)
 export const isText = (s) => typeof s === 'string' && s !== ''
 
-/** A stored seal (the `seal:` value, or a 0.9.0 meta's `handedOver`) when it is sound ({ to, toSid8, toCwdName, at }), else null. */
-export function readSeal(value) {
-  if (value == null || typeof value !== 'object' || !isText(value.to) || !isNum(value.at)) return null
-  return { to: value.to, toSid8: isText(value.toSid8) ? value.toSid8 : shortId(value.to), toCwdName: isText(value.toCwdName) ? value.toCwdName : UNKNOWN_FOLDER, at: value.at }
+/** A request or a title cut to the length the meta keeps: blanks and line breaks as one blank, `…` at the cut. */
+export const promptLine = (text, max = LIST_LIMITS.title) => clip(text, max)
+
+/** A board's name as given (by Claude or the person): { name } (blanks folded, trimmed) or { error } (read by whoever gave it). */
+export function nameOf(value) {
+  if (typeof value !== 'string') return { error: 'name は文字列で指定してください' }
+  const name = value.replace(/\s+/g, ' ').trim()
+  if (name === '') return { error: 'name が空です。ボードの名前を指定してください（例: whiteboard 開発）' }
+  if ([...name].length > NAME_LIMIT) return { error: `name は ${NAME_LIMIT} 文字までです（受け取ったのは ${[...name].length} 文字）。短くしてください` }
+  return { name }
 }
 
-/** A stored `handedFrom` when it is sound ({ sid, sid8, cwdName, updatedAt, count, at }), else null. */
-function readHandedFrom(value) {
-  if (value == null || typeof value !== 'object' || !isText(value.sid) || !isNum(value.at)) return null
-  return {
-    sid: value.sid,
-    sid8: isText(value.sid8) ? value.sid8 : shortId(value.sid),
-    cwdName: isText(value.cwdName) ? value.cwdName : UNKNOWN_FOLDER,
-    updatedAt: isNum(value.updatedAt) ? value.updatedAt : null,
-    count: isNum(value.count) ? value.count : null,
-    at: value.at,
-  }
-}
+/** A name as names are compared: width and case folded. */
+export const nameKey = (name) => String(name ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase()
 
 /**
- * A stored `meta:` value when it is sound, else null: { updatedAt, cwdName, count } and, when
- * they are there and well-formed, rootHash, firstPrompt, title, handedFrom and, in a meta 0.9.0
- * wrote, the seal as handedOver. A field it does not know, or one of the wrong type, is let go.
+ * A stored `bm:` value when it is sound, else null: { name, updatedAt, createdAt, count, cwdName,
+ * rootHash (null when it has none), lastTitle (null), lastSid (null), old }. A field it does not know, or one of the
+ * wrong type, is let go.
  */
 export function readMeta(value) {
-  if (value == null || typeof value !== 'object') return null
-  if (!isNum(value.updatedAt)) return null
-  const handedOver = readSeal(value.handedOver)
-  const handedFrom = readHandedFrom(value.handedFrom)
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return null
+  if (!isText(value.name) || !isNum(value.updatedAt)) return null
   return {
+    name: value.name,
     updatedAt: value.updatedAt,
-    cwdName: typeof value.cwdName === 'string' && value.cwdName !== '' ? value.cwdName : UNKNOWN_FOLDER,
-    count: typeof value.count === 'number' ? value.count : null,
-    ...(typeof value.rootHash === 'string' && ROOT_HASH.test(value.rootHash) ? { rootHash: value.rootHash } : {}),
-    ...(isText(value.firstPrompt) ? { firstPrompt: value.firstPrompt } : {}),
-    ...(isText(value.title) ? { title: value.title } : {}),
-    ...(handedOver ? { handedOver } : {}),
-    ...(handedFrom ? { handedFrom } : {}),
+    createdAt: isNum(value.createdAt) ? value.createdAt : value.updatedAt,
+    count: Number.isSafeInteger(value.count) && value.count >= 0 ? value.count : 0,
+    cwdName: isText(value.cwdName) ? value.cwdName : UNKNOWN_FOLDER,
+    rootHash: typeof value.rootHash === 'string' && ROOT_HASH.test(value.rootHash) ? value.rootHash : null,
+    lastTitle: isText(value.lastTitle) ? value.lastTitle : null,
+    lastSid: isText(value.lastSid) ? value.lastSid : null,
+    old: value.old === true,
   }
 }
 
 /**
- * The meta after a change: `prev` (a meta as readMeta answers it, or null) with `patch` over it.
- * A patch value that is undefined changes nothing, and null removes the field. A first request
- * already there stays: it is written once.
+ * The meta to store after a change: `prev` (as readMeta answers it) with `patch` over it. A patch
+ * value that is undefined changes nothing, null removes the field; a null or false field is not kept.
  */
 export function mergeMeta(prev, patch) {
   const out = { ...(prev ?? {}) }
@@ -175,9 +159,14 @@ export function mergeMeta(prev, patch) {
     if (value === null) delete out[key]
     else out[key] = value
   }
-  if (isText(prev?.firstPrompt)) out.firstPrompt = prev.firstPrompt
-  if (out.count === null) delete out.count
+  for (const [key, value] of Object.entries(out)) if (value === null || value === false) delete out[key]
   return out
+}
+
+/** A stored `attach:` value when it is sound ({ board, at }), else null. */
+export function readAttach(value) {
+  if (value == null || typeof value !== 'object' || !isText(value.board)) return null
+  return { board: value.board, at: isNum(value.at) ? value.at : 0 }
 }
 
 // ---- The time
@@ -207,52 +196,73 @@ export function dayStampOf(ms, now) {
   return stampOf(ms)
 }
 
-/** A card's time: `14:05` on the day of `now`, else `10/08 14:05` (an imported card is from another day). */
+/** A card's time: `14:05` on the day of `now`, else `10/08 14:05`. */
 export const cardStampOf = (ms, now) => (typeof now === 'number' && daysBefore(ms, now) !== 0 ? stampOf(ms) : clockOf(ms))
 
 // ---- The list
 
 /**
- * One other session's board as the list shows it: { sid, sid8, updatedAt, cwdName, rootHash, count,
- * titles, allTitles, pinnedCount, firstPrompt, title, handedOver }. Without a sound meta the time is
- * that of the newest card (null if there is none), the folder is unknown and rootHash null (as in a
- * meta written before it was kept); the count is always the
- * cards the board holds. `titles` are the first three in the pane's order, `allTitles` all of them
- * ({ title, pinned }). `handedOver` is the seal: the `seal:` value, else a 0.9.0 meta's.
+ * One board as the lists show it: { id, name, updatedAt, createdAt, cwdName, rootHash, count,
+ * titles, lastTitle, old }. `titles` are every card's in the pane's order (the pinned first), each
+ * { title, pinned, progress } (progress: the checklist's `3/7`, '' for none); `count` is the cards the
+ * record holds. null when the meta is not sound (such a board is not listed).
  */
-export function summarizeBoard(sid, boardValue, metaStored, sealStored) {
-  const cards = boardCardsOf(boardValue)
-  const meta = readMeta(metaStored)
-  const newest = cards.reduce((m, c) => Math.max(m, c.updatedAt), -Infinity)
-  const ordered = orderedCards(cards)
+export function summarizeBoard(id, recordValue, metaValue) {
+  const meta = readMeta(metaValue)
+  if (meta === null) return null
+  const cards = orderedCards(boardCardsOf(recordValue))
   return {
-    sid,
-    sid8: shortId(sid),
-    updatedAt: meta?.updatedAt ?? (cards.length > 0 ? newest : null),
-    cwdName: meta?.cwdName ?? UNKNOWN_FOLDER,
-    rootHash: meta?.rootHash ?? null,
+    id,
+    name: meta.name,
+    updatedAt: meta.updatedAt,
+    createdAt: meta.createdAt,
+    cwdName: meta.cwdName,
+    rootHash: meta.rootHash,
     count: cards.length,
-    titles: ordered.slice(0, SHELF_LIMITS.titles).map((c) => clip(c.title, SHELF_LIMITS.title)),
-    allTitles: ordered.slice(0, SHELF_LIMITS.openTitles).map((c) => ({ title: clip(c.title, SHELF_LIMITS.title), pinned: c.pinned === true })),
-    pinnedCount: cards.filter((c) => c.pinned === true).length,
-    firstPrompt: meta?.firstPrompt ?? null,
-    title: meta?.title ?? null,
-    handedOver: readSeal(sealStored) ?? meta?.handedOver ?? null,
+    titles: cards.map((c) => ({ title: clip(c.title, LIST_LIMITS.title), pinned: c.pinned === true, progress: taskProgress(c.body) })),
+    lastTitle: meta.lastTitle,
+    old: meta.old,
   }
 }
 
 const byNewest = (a, b) => (b.updatedAt ?? -Infinity) - (a.updatedAt ?? -Infinity)
 
 /**
- * The boards a new session may take over, in the order the pane lists them: not this session's
- * own, not empty, not sealed; those of the same folder first, then the rest, each newest first
- * (one with no time last). { boards: the first `limit`, more: how many are left out }.
+ * The boards in the three groups the lists show, each newest first: `mine`, this project's (the
+ * same root hash) that are not old; `others`, the other projects' (or of no known project) that
+ * are not old; `old`, the old ones of any project. `except` (a board id, or null) is left out: the
+ * board the session is attached to, when it looks for another.
  */
-export function candidatesOf(entries, { me, cwdName, limit = SHELF_LIMITS.boards } = {}) {
-  const open = entries.filter((e) => e.sid !== me && e.count > 0 && !e.handedOver)
-  const same = (e) => cwdName !== undefined && cwdName !== UNKNOWN_FOLDER && e.cwdName === cwdName
-  const sorted = [...open.filter(same).sort(byNewest), ...open.filter((e) => !same(e)).sort(byNewest)]
-  return { boards: sorted.slice(0, limit), more: Math.max(0, sorted.length - limit) }
+export function groupBoards(rows, { rootHash = null, except = null } = {}) {
+  const shown = rows.filter((r) => r != null && r.id !== except)
+  const same = (r) => rootHash !== null && r.rootHash === rootHash
+  return {
+    mine: shown.filter((r) => !r.old && same(r)).sort(byNewest),
+    others: shown.filter((r) => !r.old && !same(r)).sort(byNewest),
+    old: shown.filter((r) => r.old).sort(byNewest),
+  }
+}
+
+/**
+ * The board named `name` (as nameKey compares names): of this project first, then of any; the
+ * newest of those. null when no board has the name.
+ */
+export function findByName(rows, name, rootHash = null) {
+  const key = nameKey(name)
+  const named = rows.filter((r) => r != null && nameKey(r.name) === key).sort(byNewest)
+  return named.find((r) => rootHash !== null && r.rootHash === rootHash) ?? named[0] ?? null
+}
+
+/** A board of this project, other than `id`, that already has the name: the person and Claude are asked for another. */
+export const nameTaken = (rows, name, rootHash, id) =>
+  rows.some((r) => r != null && r.id !== id && rootHash !== null && r.rootHash === rootHash && nameKey(r.name) === nameKey(name))
+
+/** A row's card titles in one line: the first `max` (`固定: ` before a pinned one, its progress after), then `ほか N 枚`. */
+export function titlesLine(row, max = LIST_LIMITS.titles) {
+  if (row.count === 0) return 'カードはまだありません'
+  const shown = row.titles.slice(0, max).map((t) => (t.pinned ? '固定: ' : '') + t.title + (t.progress !== '' ? ' ' + t.progress : ''))
+  const rest = row.count - shown.length
+  return shown.join(' ・ ') + (rest > 0 ? ` ほか ${rest} 枚` : '')
 }
 
 /** The warning about the store's size: only from half of the 4 MiB, else ''. */
@@ -261,76 +271,3 @@ export function storeWarning(bytes) {
   const mb = Math.round((bytes / MIB) * 10) / 10
   return `保存できる量の半分を超えています（${mb.toFixed(1)} MB / ${STORE_MIB} MB）。これ以上増えると、${BOARD_NAME}を保存できなくなります`
 }
-
-// ---- Taking a board over
-
-const entryOf = (c) => ({ id: c.id, title: c.title, pinned: c.pinned === true })
-
-/**
- * The cards of `source` put after those of `current`: a card whose id is there already is skipped
- * (the present one stays); only as many go in as the limit leaves room for. `pinned` and
- * `updatedAt` are carried (the card keeps its own time), and a card that goes in gets `arrivedAt`
- * (the hand-over's time, when one is given), so it is not stale on arrival (stale.js). The present
- * cards are never changed, only added to. The ids of `removed` (this board's removed cards, which
- * undo_card can still bring back) count as taken like the ids on the board: a card under such an
- * id would make the board let that removed card go (board.js removedAfter), so it is skipped (it
- * stays on the source board). { cards, added, duplicates, overflow, limit }: the three lists of
- * { id, title, pinned }, `limit` the card limit it planned with (the setting `maxCards`), which
- * the words for the cards that do not fit name.
- */
-export function planHandover(current, source, limit = LIMITS.cards, arrivedAt, { removed = [] } = {}) {
-  const have = new Set([...current.map((c) => c.id), ...removed.map((c) => c.id)])
-  const cards = [...current]
-  const added = []
-  const duplicates = []
-  const overflow = []
-  for (const card of source) {
-    if (have.has(card.id)) duplicates.push(entryOf(card))
-    else if (cards.length >= limit) overflow.push(entryOf(card))
-    else {
-      have.add(card.id)
-      const copy = { ...card, ...(typeof arrivedAt === 'number' ? { arrivedAt } : {}) }
-      cards.push(copy)
-      added.push(entryOf(copy))
-    }
-  }
-  return { cards, added, duplicates, overflow, limit }
-}
-
-/** The sign of a list of cards (ids, times, pins): it differs when anything on the board changed. */
-export const cardsSig = (cards) => cards.map((c) => c.id + ':' + c.updatedAt + ':' + (c.pinned === true ? 1 : 0)).join(',')
-
-/** The words for a skipped / not-fitting count after a hand-over: `（1 枚は同じカードがあるので飛ばしました、…）` or ''.
- * Shown to the person, who does not see ids: a card with the same id reads as "the same card". */
-function skippedText({ duplicates, overflow, limit = LIMITS.cards }) {
-  const skipped = []
-  if (duplicates.length > 0) skipped.push(`${duplicates.length} 枚は同じカードがあるので飛ばしました`)
-  if (overflow.length > 0) skipped.push(`${overflow.length} 枚は上限（${limit} 枚）に達したので入りませんでした`)
-  return skipped.length > 0 ? `（${skipped.join('、')}）` : ''
-}
-
-/** Where a board came from, in a few words: `今日 14:05 · my-project`. */
-export const originText = (row, now) => `${typeof row.updatedAt === 'number' ? dayStampOf(row.updatedAt, now) : '時刻不明'} · ${row.cwdName}`
-
-/** The one line the pane shows after a hand-over. */
-export function handoverText(plan, row, now) {
-  return `${plan.added.length} 枚を引き継ぎました（${originText(row, now)} の${BOARD_NAME}から）。元の${BOARD_NAME}は読み取り専用になりました。` + skippedText(plan)
-}
-
-/** Where a sealed board went: `別のセッション（my-project · ID b7de12ab）`. */
-const sealedTo = (sealed) => `別のセッション（${sealed.toCwdName} · ID ${sealed.toSid8}）`
-
-/** What a write to a sealed board is refused with (read by Claude). */
-export const sealedDenyText = (sealed) =>
-  `このボードは読み取り専用です。${stampOf(sealed.at)} に、${sealedTo(sealed)}へ引き継がれました。` +
-  'カードの追加・書き換え・削除はできません（list_cards で読むことはできます）。続きは引き継ぎ先のセッションで書くよう、利用者に伝えてください。'
-
-/** What a write is refused with when the seal could not be read (read by Claude): a board that may be sealed is not written. */
-export const sealUnreadableText = (message) =>
-  `ボードの状態（読み取り専用かどうか）を読めなかったので、書き込みを止めました（${message}）。もう一度試してください。何度やっても同じなら、そのことを利用者に伝えてください。`
-
-/** The line for the frame when [引き継ぐ] is pressed on a board that is read-only itself. */
-export const selfSealedText = () => `この${BOARD_NAME}は読み取り専用なので、引き継げません。先に [このセッションで書けるように戻す] を押してください`
-
-/** The line of list_cards on a sealed board, right after its revision line. */
-export const sealedListLine = (sealed) => `（このボードは読み取り専用です。${stampOf(sealed.at)} に${sealedTo(sealed)}へ引き継がれました）`

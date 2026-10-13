@@ -18,11 +18,11 @@ export const GUIDE_ID = 'whiteboard:guide'
 
 /** The section's text: fixed. Keep it to a sentence or two. */
 export const GUIDE_SHORT =
-  '作業ボード（mcp__whiteboard__*）があります。流れる手順・URL・状況はカードに残し、読むなら list_cards を titles_only か query で。使い方は ToolSearch で whiteboard を引く。'
+  '作業ボード（mcp__whiteboard__*）があります。使う前に open_board で名前のボードにつなぐ。流れる手順・URL・状況はカードに残し、読むなら list_cards を titles_only か query で。使い方は ToolSearch で whiteboard を引く。'
 
 /** The few lines of `full`: which tool for what, and how to pin. Fixed too. */
 export const GUIDE_FULL =
-  'ボードの使い分け: 全文を書き直すのは set_card。一部だけ変えるときは edit_card（本文中の find を replace に置き換える。一致が 1 箇所のときだけ）、末尾に足すだけなら append_card。' +
+  'ボードの使い分け: つないでいなければ先に open_board。全文を書き直すのは set_card。一部だけ変えるときは edit_card（本文中の find を replace に置き換える。一致が 1 箇所のときだけ）、末尾に足すだけなら append_card。' +
   '読むときは list_cards を titles_only か query で呼び、必要なカードだけ id で読む。' +
   '人が常に見ていたいカード（今の手順の全体像、URL の一覧）だけ pin: true にし、使いすぎない。済んだカードは remove_card で消す。'
 

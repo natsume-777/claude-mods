@@ -1,8 +1,15 @@
-// The seven tools Claude calls (toolsFor, TOOLS): what each is told, its input, whether it writes,
-// and what it does to the cards (board.js). How a call runs against the store is register.js's (pure)
+// The tools Claude calls (pure; how a call runs against the store is register.js's):
+//   toolsFor, TOOLS  the seven card tools: what each is told, its input, whether it writes, and what
+//                    it does to the cards of the board the session is attached to (board.js)
+//   BOARD_TOOLS      the three board tools (open_board, list_boards, rename_board): what each is
+//                    told and its input; register.js does their work
 
 import { LIMITS, applySet, applyEdit, applyAppend, applyRemove, applyClear, applyList, applyUndo, REMOVED_KEEP } from './board.js'
+import { NAME_LIMIT } from './boards.js'
 import { STYLE_INPUTS } from './style.js'
+
+// What every card tool's description starts with: the cards are on the board the session is attached to
+const ATTACHED_FIRST = 'このセッションがつないでいるボードが相手。どのボードにもつないでいなければ断られるので、先に open_board でつなぐ。'
 
 // The `style` input of set_card and edit_card: a plain string checked in board.js (no enum), so
 // the names listed here are the only ones Claude is told of
@@ -18,6 +25,7 @@ export const toolsFor = (maxCards = LIMITS.cards) => ({
     description:
       'ボード（人が画面の右のパネルで見る作業メモ）に、カードを追加するか上書きする。会話のログに埋もれて流れてしまう情報を残すために使う: ' +
       '進行中の手順やチェックリスト、並行して動かしている処理の状況、このセッションに関わる URL、決めたこと。' +
+      ATTACHED_FIRST +
       '同じ id のカードは上書きされ（位置は変わらない）、状況が変わったら同じ id で更新する。1 カード 1 話題にして、本文は要点だけにする。' +
       '本文の一部だけを変えるときは、全文を書き直さず edit_card（一部の置き換え）か append_card（末尾に足す）を使う。' +
       '用が済んだカードは remove_card で消す。会話にもう書いたことを、ただ写すためには使わない。' +
@@ -101,10 +109,8 @@ export const toolsFor = (maxCards = LIMITS.cards) => ({
       'query は空白で分けた語をすべて含むカードを返す（id・title・body のどれか、大文字小文字は区別せず、日本語は部分一致）。各カードに、一致した行の番号（本文の 1 始まり。title か id だけの一致は 0）と、その行の先頭 120 文字を最大 5 件付ける。titles_only も一緒にあれば、その一致の行は付けず title だけにする。' +
       '結果の 1 行目は rev: N（ボードの版。書き換えのたびに増える）。読んだ rev を覚えておき、次は since にその rev を渡すと、その後に書き換えられたカードだけと、今ある全カードの ids が返る（ids に無いカードは消された）。全部を読み直さずに済む。' +
       'since は titles_only・query と組み合わせられる（変わったカードの中だけ）。会話の圧縮のあとや rev が分からないときは、titles_only から読む。' +
-      'others: true は、同じ場所（フルパス）のプロジェクトの前のセッションのボードを読む（読むだけで、書き換えはできない。場所を記録する前の版で書かれたボードは読めない）。利用者が「前のセッションで書いた URL はどこ？」のように尋ねたときに使う。' +
-      '新しい順に最大 5 件で、各ボードの見出し行（board: と ID の 8 文字、日時、フォルダ、枚数、題か最初の依頼、引き継ぎ済みならその印）の下に、カードの id・title・chars が並ぶ。' +
-      'query と一緒なら、それらのボードのカードを同じ規則で探す（一致したボードを新しい順に 5 件）。1 枚を全文で読むときは id と board（見出しの 8 文字）を渡す。others では since は使われない。' +
-      '結果は 6000 文字までで、超えると切ってその旨を書く。設定 handover がオフなら断られる。前のボードのカードをこのボードに持ってくるのは、利用者がパネルの [引き継ぐ] で行う。',
+      ATTACHED_FIRST +
+      'ほかのボードの中身を読むときは、list_boards で探して、open_board でそのボードにつなぎ直す。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -116,9 +122,7 @@ export const toolsFor = (maxCards = LIMITS.cards) => ({
         },
         id: { type: 'string', description: 'このカード 1 枚の id・title・body だけを返す' },
         query: { type: 'string', description: '検索語。空白で分けた語をすべて含むカードを返す（大文字小文字は区別しない、日本語は部分一致）' },
-        since: { type: 'integer', description: '前に読んだときの rev。それより後に書き換えられたカードだけと、今ある全カードの ids を返す。others では使われない' },
-        others: { type: 'boolean', description: 'true で、このセッションではなく、同じ場所（フルパス）のプロジェクトの前のセッションのボードを読む（読むだけ）。titles_only・query・id と組み合わせられる' },
-        board: { type: 'string', description: 'others で読むボード: 見出しの board: の 8 文字。id で 1 枚を読むときは必須' },
+        since: { type: 'integer', description: '前に読んだときの rev。それより後に書き換えられたカードだけと、今ある全カードの ids を返す' },
       },
     },
     writes: false,
@@ -139,3 +143,40 @@ export const toolsFor = (maxCards = LIMITS.cards) => ({
 
 /** The tools with the default card limit. */
 export const TOOLS = toolsFor()
+
+/** The three board tools: what each is told and its input (register.js runs them). */
+export const BOARD_TOOLS = {
+  open_board: {
+    description:
+      'ボード（人が画面の右のパネルで見る作業メモ）に、このセッションをつなぐ。ボードはセッションに属さず、名前で呼ぶ。新しいセッションはどのボードにもつながっていないので、カードを書く・読む前に一度呼ぶ。' +
+      'name と同じ名前のボードがあれば（このプロジェクトのものを優先、大文字小文字や全角半角は区別しない）それにつなぎ、無ければその名前で新しく作ってつなぐ。' +
+      '名前は作業の内容が分かる短い言葉にする（例: whiteboard 開発、CI の修正）。プロジェクト全体で 1 枚にするか、話題ごとに分けるかは、利用者の頼み方に合わせる。' +
+      '利用者が「◯◯のボードを使って」と言ったときや、引き継ぎの文にボードの名前が書いてあるときは、その名前を渡す。迷うときは先に list_boards で今あるボードを見る。' +
+      `ほかのボードにつなぎ直すこともできる（同じボードに、ほかのセッションも同時につながっていてよい）。名前は ${NAME_LIMIT} 文字まで。`,
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string', description: `つなぐ（無ければ作る）ボードの名前。${NAME_LIMIT} 文字まで` } },
+      required: ['name'],
+    },
+  },
+  list_boards: {
+    description:
+      'ボードの一覧を読む。このプロジェクトのボードを新しい順に、名前・最後の書き込みの日時・枚数・最後に書いたセッションの題・カードの題（固定が先、チェックリストの進み具合つき）で並べる。' +
+      'このセッションがつないでいるボードには印が付く。ほかのプロジェクトのボードと古いボード（前の版で別のセッションに引き継がれたもの）は件数だけで、all: true なら一覧に入る。' +
+      'どのボードにつなぐか決めるときや、「前に書いたボードはある？」と聞かれたときに使う。中身を読むには open_board でつないでから list_cards。',
+    inputSchema: {
+      type: 'object',
+      properties: { all: { type: 'boolean', description: 'true で、ほかのプロジェクトのボードと古いボードも並べる' } },
+    },
+  },
+  rename_board: {
+    description:
+      `このセッションがつないでいるボードの名前を変える。利用者に頼まれたときや、話題が変わって名前が合わなくなったときに使う。${NAME_LIMIT} 文字まで。` +
+      'このプロジェクトのほかのボードと同じ名前にはできない。つないでいなければ断られる。',
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string', description: `新しい名前。${NAME_LIMIT} 文字まで` } },
+      required: ['name'],
+    },
+  },
+}
