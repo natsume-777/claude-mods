@@ -13,7 +13,7 @@
 // and session id prefixes only; never prompt, response or tool-result text, nor agent or skill
 // descriptions.
 
-import { parseThread, aggregateThreads, modelWeight, contextOf, DEFAULT_WEIGHTS, HANDOFF_OUTPUT } from './aggregate.js';
+import { parseThread, aggregateThreads, modelWeight, contextOf, isoString, TYPES, DEFAULT_WEIGHTS, HANDOFF_OUTPUT } from './aggregate.js';
 
 /** Tool-result characters per token, rough for mixed Japanese/English text. */
 export const CHARS_PER_TOKEN = 3;
@@ -256,7 +256,9 @@ function taskBoundary(t, fresh, mw, T) {
 /**
  * sessions: [{ id, project, main: records[], subagents: [{ id, meta, records }] }]
  * opts: { since, until (epoch ms, until exclusive), top, weights,
- *   agentDefs: { [agentType]: { path, cacheTtl, tools, model } } (located by audit.js) }
+ *   agentDefs: { [agentType]: { path, cacheTtl, tools, model } } (located by audit.js),
+ *   bySession (adds perSession[], see sessionSummaries),
+ *   compareAt (epoch ms; adds perSession[] and compare, see compareSessions) }
  *
  * A request counts when its timestamp is in [since, until). Thread-shape facts (first and last
  * context, gaps, resumes) are read on the whole thread so a range boundary does not invent a gap.
@@ -272,6 +274,8 @@ export function audit(sessions, opts = {}) {
     + T.cache_write_1h * q.tok.cache_write_1h + T.output * q.tok.output);
   const writeTok = (q) => q.tok.cache_write_5m + q.tok.cache_write_1h;
   const writeWeigh = (q) => mw(q) * (T.cache_write_5m * q.tok.cache_write_5m + T.cache_write_1h * q.tok.cache_write_1h);
+  /** Main-idle rewrite: a main request in range after > 1 h idle past its TTL; its cache write, else 0. */
+  const idleRewrite = (r) => (!r.inRange || r.i === 0 || r.gap <= HOUR || r.gap <= r.ttl ? 0 : writeTok(r.q));
 
   // ---- threads with per-request annotations
   const threads = [];
@@ -382,7 +386,11 @@ export function audit(sessions, opts = {}) {
 
   // ---- findings
   const findings = [];
-  const add = (f) => findings.push({ ...f, share: total ? f.saving / total : 0 });
+  // Every finding's saving is a sum over items that each belong to one thread, so it splits by
+  // session: savingBy[id] = Map(session id -> that session's part of the saving).
+  const savingBy = new Map();
+  const credit = (m, session, v) => { if (v) m.set(session, (m.get(session) || 0) + v); };
+  const add = (f, by) => { findings.push({ ...f, share: total ? f.saving / total : 0 }); if (by) savingBy.set(f.id, by); };
 
   // 1. What the main thread carries from request to request, split in two:
   //    (a) large tool results that entered the main thread (Read, Bash, WebFetch, Grep, subagent
@@ -414,7 +422,7 @@ export function audit(sessions, opts = {}) {
         carry += mw(r.q) * T.cache_read * tokens;
         saving += mw(r.q) * T.cache_read * Math.max(0, tokens - SUMMARY_TOKENS);
       }
-      if (n) large.push({ tool: x.tool, target: x.target, session: t.session.slice(0, 8), chars: x.chars, tokens, requests: n, carry, saving });
+      if (n) large.push({ tool: x.tool, target: x.target, session: t.session.slice(0, 8), chars: x.chars, tokens, requests: n, carry, saving, _s: t.session });
     }
   }
   large.sort((a, b) => b.carry - a.carry);
@@ -422,11 +430,13 @@ export function audit(sessions, opts = {}) {
   const restCarry = Math.max(0, mainReadWeight - largeCarry);
   const boundaries = mains.map((t) => ({ session: t.session.slice(0, 8), ...(taskBoundary(t, fresh, mw, T) || {}) }))
     .filter((b) => b.carried).sort((a, b) => b.carried - a.carried);
-  mainContext.largeResults = { count: large.length, carry: largeCarry, top: large.slice(0, top) };
+  mainContext.largeResults = { count: large.length, carry: largeCarry, top: large.slice(0, top).map(({ _s, ...x }) => x) };
   mainContext.otherCarry = restCarry;
   mainContext.taskBoundaries = boundaries.slice(0, top);
   if (large.length) {
     const saving = sum(large.map((x) => x.saving));
+    const by = new Map();
+    for (const x of large) credit(by, x._s, x.saving);
     const label = (x) => `${x.tool}${x.target ? ' ' + x.target : ''} in ${x.session}: ~${fmt(x.tokens)} tokens x ${x.requests} req = ${fmt(x.carry)}`;
     add({ id: 'main-context', title: 'Large one-off output carried in the main conversation', saving, kind: 'judgement',
       target: { thread: 'main' },
@@ -439,7 +449,7 @@ export function audit(sessions, opts = {}) {
       ],
       action: 'Keep one-off large output out of the main conversation: delegate the reading to a subagent that returns only the point, write large output to a file and read only the needed part, ask WebFetch a question that returns only the answer. '
         + 'The rest, (b), is the context the work needs: do not cut it; fewer requests help (batch tool calls in one turn, fewer background-completion notices).'
-        + (boundaries.length ? ' At the task boundaries listed above, if the next work did not need the earlier conversation, /clear or a fresh session was also an option (the transcript cannot show whether it was needed).' : '') });
+        + (boundaries.length ? ' At the task boundaries listed above, if the next work did not need the earlier conversation, /clear or a fresh session was also an option (the transcript cannot show whether it was needed).' : '') }, by);
   }
 
   // 2. Subagents resumed after their 5m cache expired, per agent type.
@@ -451,15 +461,18 @@ export function audit(sessions, opts = {}) {
   for (const a of agentTypes) {
     if (a.write1h > a.write5m) continue;
     let avoided = 0, rTok = 0, k = 0, over = 0, within = 0, extra = 0;
+    const by = new Map();
     for (const t of a._threads) for (const r of t.rows) {
       if (!r.inRange) continue;
       extra += mw(r.q) * (T.cache_write_1h - T.cache_write_5m) * r.q.tok.cache_write_5m;
+      credit(by, t.session, -mw(r.q) * (T.cache_write_1h - T.cache_write_5m) * r.q.tok.cache_write_5m);
       if (!r.resume) continue;
       if (r.gap <= r.ttl) { within += 1; continue; }
       if (r.gap > HOUR || r.ttl !== FIVE_MIN || !r.q.tok.cache_write_5m) { over += 1; continue; }
       const R = Math.min(r.q.tok.cache_write_5m, r.prevCtx);
       avoided += mw(r.q) * (T.cache_write_5m - T.cache_read) * R;
       extra -= mw(r.q) * (T.cache_write_1h - T.cache_write_5m) * R;
+      credit(by, t.session, mw(r.q) * ((T.cache_write_5m - T.cache_read) + (T.cache_write_1h - T.cache_write_5m)) * R);
       rTok += R; k += 1;
     }
     const saving = avoided - extra;
@@ -479,7 +492,7 @@ export function audit(sessions, opts = {}) {
         ? 'The definition already sets cacheTtl: 1h but the transcripts show 5-minute writes: check the subagentPromptCacheTtl setting / CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL (they take precedence) or usage credits (1h ignored). Or ask follow-ups in one batch.'
         : tg.custom
           ? `Add "cacheTtl: 1h" under "experimental:" in the frontmatter of ${tg.definition}, or ask follow-up questions in one batch.`
-          : 'Built-in definitions cannot be edited: make a custom agent for this role with experimental.cacheTtl: 1h, or ask follow-ups in one batch / re-read in the main thread instead of resuming after 5 min.' });
+          : 'Built-in definitions cannot be edited: make a custom agent for this role with experimental.cacheTtl: 1h, or ask follow-ups in one batch / re-read in the main thread instead of resuming after 5 min.' }, by);
   }
 
   // 3. Main thread resumed after more than an hour idle (its 1h cache had expired).
@@ -491,16 +504,16 @@ export function audit(sessions, opts = {}) {
   //    weight), heaviest rewrite first. kind 'warning': a habit, nothing to edit.
   {
     let saving = 0, k = 0, rw = 0, rwW = 0;
-    const idle = [];
+    const idle = [], by = new Map();
     for (const t of mains) {
       const e = { session: t.session.slice(0, 8), project: t.project, resumes: 0, gapsHours: [], contexts: [], rewriteTokens: 0, rewriteWeighted: 0 };
       for (const r of t.rows) {
-        if (!r.inRange || r.i === 0 || r.gap <= HOUR || r.gap <= r.ttl) continue;
-        const wt = writeTok(r.q);
+        const wt = idleRewrite(r);
         if (!wt) continue;
         const w = r.q.tok.cache_write_1h >= r.q.tok.cache_write_5m ? T.cache_write_1h : T.cache_write_5m;
         k += 1; rw += wt; rwW += writeWeigh(r.q);
-        saving += Math.max(0, mw(r.q) * w * Math.max(0, wt - (fresh + HANDOFF_CONTEXT)) - mw(r.q) * T.output * HANDOFF_OUTPUT);
+        const v = Math.max(0, mw(r.q) * w * Math.max(0, wt - (fresh + HANDOFF_CONTEXT)) - mw(r.q) * T.output * HANDOFF_OUTPUT);
+        saving += v; credit(by, t.session, v);
         e.resumes += 1; e.gapsHours.push(Math.round(r.gap / 360) / 10); e.contexts.push(r.ctx);
         e.rewriteTokens += wt; e.rewriteWeighted += writeWeigh(r.q);
       }
@@ -516,7 +529,7 @@ export function audit(sessions, opts = {}) {
           `a fresh start with a handoff would write about ${fmt(fresh + HANDOFF_CONTEXT)} tokens`,
           ...idle.slice(0, 5).map((x) => `${x.session}: ${x.resumes} resume${x.resumes > 1 ? 's' : ''}, gaps ${x.gapsHours.map((h) => h + ' h').join(', ')}; context ${x.contexts.map(fmt).join(', ')}; rewrite ${fmt(x.rewriteWeighted)} weighted (${pctOf(x.rewriteWeighted, total)})`),
         ],
-        action: 'When coming back after an hour or more, start a new session with a handoff note written before leaving (while the cache is warm); do not reopen the old session just to ask it for a handoff. If the earlier conversation is really needed, continuing is fine.' });
+        action: 'When coming back after an hour or more, start a new session with a handoff note written before leaving (while the cache is warm); do not reopen the old session just to ask it for a handoff. If the earlier conversation is really needed, continuing is fine.' }, by);
     }
   }
 
@@ -547,6 +560,7 @@ export function audit(sessions, opts = {}) {
     // per part: runs that had it, median chars per such run, how many were sent after the
     // run's first request (later), and the weight they cost
     for (const key of Object.values(PARTS)) parts[key] = { runs: 0, chars: [], later: 0, write: 0, read: 0, cost: 0 };
+    const by = new Map();
     for (const t of a._threads) {
       const perRun = {};
       for (const x of t.attachments) {
@@ -556,6 +570,7 @@ export function audit(sessions, opts = {}) {
         perRun[key] = (perRun[key] || 0) + x.chars;
         if (x.at > 0) e.later += 1;
         e.write += c.write; e.read += c.read; e.cost += c.write + c.read;
+        if (removable.includes(key)) credit(by, t.session, c.write + c.read);
       }
       for (const [key, n] of Object.entries(perRun)) { parts[key].runs += 1; parts[key].chars.push(n); }
     }
@@ -586,7 +601,7 @@ export function audit(sessions, opts = {}) {
           : `If ${a.agentType} does not need to load skills, remove "Skill" from "tools:" in ${tg.definition} (give it what it needs in the prompt instead).`)
         : permission === 'all-tools'
           ? `Add a "tools:" line to ${tg.definition} that lists only the tools ${a.agentType} needs (leave out Skill unless it loads skills).`
-          : `This definition cannot be edited: make an own agent definition for this role whose "tools:" lists only the tools it needs (without Skill unless it loads skills), and use it instead of ${a.agentType}.` });
+          : `This definition cannot be edited: make an own agent definition for this role whose "tools:" lists only the tools it needs (without Skill unless it loads skills), and use it instead of ${a.agentType}.` }, by);
   }
 
   // 4b. The skill listing in the main threads (skill-listing).
@@ -617,7 +632,7 @@ export function audit(sessions, opts = {}) {
     }
     const plugins = new Map();
     const plug = (p) => plugins.get(p) || plugins.set(p, { plugin: p, skills: new Set(), chars: 0, uses: uses.get(p) || 0, carry: 0 }).get(p);
-    const perSession = [];
+    const perSession = [], sessPlug = new Map();
     let write = 0, read = 0, listings = 0, chars = 0;
     for (const t of mains) {
       const s = { session: t.session.slice(0, 8), startChars: 0, reinjections: 0, additions: 0, carry: 0 };
@@ -633,7 +648,11 @@ export function audit(sessions, opts = {}) {
           p.skills.add(e.name);
           byPlugin.set(p, (byPlugin.get(p) || 0) + e.chars);
         }
-        for (const [p, n] of byPlugin) { p.chars = Math.max(p.chars, n); p.carry += carry * n / x.chars; }
+        const sp = sessPlug.get(t.session) || sessPlug.set(t.session, new Map()).get(t.session);
+        for (const [p, n] of byPlugin) {
+          p.chars = Math.max(p.chars, n); p.carry += carry * n / x.chars;
+          sp.set(p, (sp.get(p) || 0) + carry * n / x.chars);
+        }
       }
       if (s.carry) perSession.push(s);
     }
@@ -642,6 +661,8 @@ export function audit(sessions, opts = {}) {
       uses: p.uses, used: p.uses > 0, carry: p.carry, share: total ? p.carry / total : 0, _prefix: p.plugin })).sort((a, b) => b.carry - a.carry);
     const unused = table.filter((p) => p._prefix && !p.used);
     const saving = sum(unused.map((p) => p.carry));
+    const by = new Map();
+    for (const [sid, sp] of sessPlug) for (const [p, c] of sp) if (p.plugin && !p.uses) credit(by, sid, c);
     const carry = write + read;
     const subs = live.filter((t) => t.kind === 'sub').flatMap((t) => t.attachments.filter((x) => x.type === 'skill_listing' && x.at < t.rows.length));
     const starts = perSession.map((x) => x.startChars).filter(Boolean);
@@ -665,7 +686,7 @@ export function audit(sessions, opts = {}) {
           `subagents received ${subs.length} listings (${fmt(skillListing.subagents.chars)} chars): counted under agent-tools, not here`,
         ],
         action: `Turn off the plugins none of whose skills was used in this range: ${unused.map((p) => `${p.plugin} (${p.skills} skills)`).join(', ')}. Their skill descriptions are part of every skill listing. `
-          + 'A plugin shown by "claude plugin list" is turned off in the project settings (this project only); a plugin enabled on the claude.ai account is turned off in the claude.ai settings (every project). For a plugin in neither, name it only.' });
+          + 'A plugin shown by "claude plugin list" is turned off in the project settings (this project only); a plugin enabled on the claude.ai account is turned off in the claude.ai settings (every project). For a plugin in neither, name it only.' }, by);
     }
   }
 
@@ -680,12 +701,15 @@ export function audit(sessions, opts = {}) {
     if (a.runs < 3 || a.resumes || a.growth > 1.5 || a.requestsPerRun > 10) continue;
     const mm = modelWeight(mainModel, W);
     let skillCost = 0;
+    const by = new Map();
     for (const t of a._threads) {
       const rs = t.rows.filter((r) => r.inRange);
       if (!rs.length) continue;
       const out = sum(rs.map((r) => r.q.tok.output));
-      skillCost += mm * (rs.length * T.cache_read * mainContext.median
+      const c = mm * (rs.length * T.cache_read * mainContext.median
         + T.cache_write_1h * Math.max(0, t.rows[t.rows.length - 1].ctx - t.rows[0].ctx) + T.output * out);
+      skillCost += c;
+      credit(by, t.session, sum(rs.map((r) => r.weighted)) - c);
     }
     const saving = a.weighted - skillCost;
     if (saving <= 0) continue;
@@ -695,7 +719,7 @@ export function audit(sessions, opts = {}) {
         `${a.runs} runs, never resumed, median ${a.requestsPerRun} requests per run, context growth x${a.growth.toFixed(2)}`,
         `actual ${fmt(a.weighted)} weighted vs about ${fmt(skillCost)} if done in the main thread (median main context ${fmt(mainContext.median)})`,
       ],
-      action: 'Turn the task into a skill: it runs on the main thread\'s 1h cache with no start-up write. Use "context: fork" if its output is large.' });
+      action: 'Turn the task into a skill: it runs on the main thread\'s 1h cache with no start-up write. Use "context: fork" if its output is large.' }, by);
   }
 
   // 6. Subagents on the most expensive model tier (quality trade-off, suggestion only).
@@ -708,11 +732,13 @@ export function audit(sessions, opts = {}) {
       if (!rs.length) continue;
       const wTop = sum(rs.map((r) => r.weighted));
       const saving = wTop * (1 - next / topR);
+      const by = new Map();
+      for (const t of a._threads) for (const r of t.rows) if (r.inRange && mw(r.q) === topR) credit(by, t.session, r.weighted * (1 - next / topR));
       const tg = targetOf(a.agentType, defs);
       const nextName = (W.model.find((x) => x[1] === next) || [''])[0];
       add({ id: `model:${a.agentType}`, title: `${a.agentType}: runs on the most expensive model tier`, saving, kind: 'judgement', target: tg,
         evidence: [`${fmt(rs.length)} requests on ${[...new Set(rs.map((r) => r.q.model))].join(', ')}: ${fmt(wTop)} weighted; model ratio ${next}/${topR} for ${nextName}`],
-        action: `Only if the task does not need the top tier: set "model: ${nextName}" in ${tg.custom ? tg.definition : 'a custom definition for this role'} (quality trade-off).` });
+        action: `Only if the task does not need the top tier: set "model: ${nextName}" in ${tg.custom ? tg.definition : 'a custom definition for this role'} (quality trade-off).` }, by);
     }
   }
 
@@ -733,10 +759,10 @@ export function audit(sessions, opts = {}) {
       const cost = mw(r0.q) * tokens * (T[t.writeType] + T.cache_read * Math.max(0, end - x.at - 1));
       const where = t.kind === 'main' ? 'main' : 'subagents';
       const k = where + '\u0000' + x.tool;
-      const g = toolGroups.get(k) || { where, tool: x.tool, calls: 0, chars: 0, cost: 0, largeCalls: 0, largeChars: 0, largeCost: 0, files: new Map() };
+      const g = toolGroups.get(k) || { where, tool: x.tool, calls: 0, chars: 0, cost: 0, largeCalls: 0, largeChars: 0, largeCost: 0, files: new Map(), by: new Map() };
       g.calls += 1; g.chars += x.chars; g.cost += cost;
       if (x.chars >= LARGE_RESULT_CHARS) {
-        g.largeCalls += 1; g.largeChars += x.chars; g.largeCost += cost;
+        g.largeCalls += 1; g.largeChars += x.chars; g.largeCost += cost; credit(g.by, t.session, cost / 2);
         if (x.target) g.files.set(x.target, (g.files.get(x.target) || 0) + x.chars);
       }
       toolGroups.set(k, g);
@@ -757,11 +783,20 @@ export function audit(sessions, opts = {}) {
         `${fmt(g.largeCalls)} of ${fmt(g.calls)} results >= ${fmt(LARGE_RESULT_CHARS)} chars: ${fmt(g.largeChars)} chars (~${fmt(g.largeChars / CHARS_PER_TOKEN)} tokens), ${fmt(g.largeCost)} weighted while kept in context`,
         ...(topFiles.length ? ['largest targets: ' + topFiles.map(([f, c]) => `${f} ${fmt(c)} chars`).join(', ')] : []),
       ],
-      action: 'Tell the agent (in its definition or prompt) to read narrowly: offset/limit, search before reading whole files.' });
+      action: 'Tell the agent (in its definition or prompt) to read narrowly: offset/limit, search before reading whole files.' }, g.by);
   }
 
   findings.sort((a, b) => b.saving - a.saving);
   const shown = findings.filter((f) => f.share >= MIN_SHARE);
+
+  let perSession, compare;
+  if (opts.bySession || opts.compareAt != null) {
+    const largeCount = new Map();
+    for (const x of large) largeCount.set(x._s, (largeCount.get(x._s) || 0) + 1);
+    const full = sessionSummaries(live, shown, savingBy, largeCount, idleRewrite, writeTok);
+    if (opts.compareAt != null) compare = compareSessions(full, shown, opts.compareAt);
+    perSession = full.map(publicSummary);
+  }
 
   return {
     disclaimer: 'Weighted = rough limit weight from public API price ratios x model ratio; the subscription formula is not public, so savings are estimates.',
@@ -775,12 +810,215 @@ export function audit(sessions, opts = {}) {
     mainContext,
     agentTypes: agentTypes.map(({ _threads, ...a }) => a),
     skillListing,
-    toolResults: [...toolGroups.values()].map(({ files: _f, ...g }) => g).sort((a, b) => b.cost - a.cost),
+    toolResults: [...toolGroups.values()].map(({ files: _f, by: _b, ...g }) => g).sort((a, b) => b.cost - a.cost),
     files: [...files.values()].map((f) => ({ file: f.file, reads: f.reads, chars: f.chars, cost: f.cost, threads: f.threads.size }))
       .sort((a, b) => b.cost - a.cost).slice(0, top),
     findings: shown.slice(0, top),
     omittedFindings: findings.length - Math.min(shown.length, top),
+    ...(perSession ? { perSession } : {}),
+    ...(compare ? { compare } : {}),
   };
+}
+
+// ---- per session (--by-session) and before / after (--compare-at)
+
+/**
+ * One summary per session with requests in range, sorted by start. Every number counts the
+ * session's requests in range only (main thread and subagents):
+ *   start, end       the first and last such request (ISO)
+ *   turns            main-thread requests in range that began a turn: the first request of the
+ *                    session, and each request that followed a new prompt after the previous
+ *                    turn had ended (scanThread's 'start' and 'resume'). A prompt typed while
+ *                    a tool loop was still running is part of that turn. At least 1 when the
+ *                    main thread has requests in range; 0 when it has none. A main thread
+ *                    split over several project folders counts as one
+ *   tok, weighted    per token type, and the rough weight
+ *   weightedPerTurn, weightedPerRequest   weighted / turns (null without turns), / requests
+ *   cacheHitRatio    cache_read / (input + cache_read + both cache writes)
+ *   mainContext      the main thread's context per request: median, p90, max
+ *   subagentShare    the subagents' weighted / the session's weighted
+ *   idleResumes      main-idle's resumes in this session and the tokens they rewrote
+ *   skillListing     the main thread's skill listing: chars at the start, full re-sends later,
+ *                    small additions
+ *   agentTypes       per agent type: runs, starting context (median first-request context of
+ *                    its runs), skill listings sent after a run's first request, 5m and 1h
+ *                    cache writes and the 5m share of them
+ *   findings         the findings (above MIN_SHARE, not cut by --top) whose estimated saving
+ *                    has a positive part in this session: { id, saving, ...that finding's
+ *                    metric for the session }
+ */
+function sessionSummaries(live, shown, savingBy, largeCount, idleRewrite, writeTok) {
+  const bySession = new Map();
+  for (const t of live) (bySession.get(t.session) || bySession.set(t.session, []).get(t.session)).push(t);
+  const out = [];
+  for (const [sid, ts] of bySession) {
+    const rows = ts.flatMap((t) => t.rows.filter((r) => r.inRange));
+    const tok = Object.fromEntries(TYPES.map((k) => [k, sum(rows.map((r) => r.q.tok[k]))]));
+    const weighted = sum(rows.map((r) => r.weighted));
+    const stamps = rows.map((r) => r.q.ts).filter(Number.isFinite);
+    const startMs = stamps.length ? Math.min(...stamps) : NaN;
+    // A session's main thread can be split over several project folders (its working folder
+    // changed): the earliest piece holds the start, the others continue it.
+    const mains = ts.filter((t) => t.kind === 'main').sort((a, b) => a.rows[0].q.ts - b.rows[0].q.ts);
+    const mrows = mains.flatMap((t) => t.rows.filter((r) => r.inRange));
+    let turns = mrows.filter((r) => r.trigger === 'resume').length + (mains.length && mains[0].rows[0].inRange ? 1 : 0);
+    if (!turns && mrows.length) turns = 1;
+    const ctxs = mrows.map((r) => r.ctx);
+    const subW = sum(ts.filter((t) => t.kind === 'sub').flatMap((t) => t.rows.filter((r) => r.inRange).map((r) => r.weighted)));
+    const idle = { resumes: 0, rewriteTokens: 0 };
+    for (const r of mrows) { const wt = idleRewrite(r); if (wt) { idle.resumes += 1; idle.rewriteTokens += wt; } }
+    const listing = { startChars: 0, reinjections: 0, additions: 0 };
+    mains.forEach((main, k) => {
+      for (const x of main.attachments) {
+        if (x.type !== 'skill_listing' || x.at >= main.rows.length || !main.rows[x.at].inRange) continue;
+        if (x.at === 0 && k === 0) listing.startChars += x.chars; else if (x.isInitial) listing.reinjections += 1; else listing.additions += 1;
+      }
+    });
+    const agentTypes = {};
+    for (const t of ts.filter((x) => x.kind === 'sub')) {
+      const e = agentTypes[t.agentType] || (agentTypes[t.agentType] = { runs: 0, _firsts: [], listingReinjections: 0, write5m: 0, write1h: 0 });
+      e.runs += 1; e._firsts.push(t.rows[0].ctx);
+      e.listingReinjections += t.attachments.filter((x) => x.type === 'skill_listing' && x.at > 0 && x.at < t.rows.length && t.rows[x.at].inRange).length;
+      for (const r of t.rows) if (r.inRange) { e.write5m += r.q.tok.cache_write_5m; e.write1h += r.q.tok.cache_write_1h; }
+    }
+    for (const e of Object.values(agentTypes)) {
+      e.startContext = median(e._firsts);
+      e.write5mShare = e.write5m + e.write1h ? e.write5m / (e.write5m + e.write1h) : null;
+    }
+    const inSide = tok.input + tok.cache_read + tok.cache_write_5m + tok.cache_write_1h;
+    const s = {
+      id: sid.slice(0, 8), project: ts[0].project, start: isoString(startMs), end: isoString(stamps.length ? Math.max(...stamps) : NaN),
+      requests: rows.length, turns, tok, weighted,
+      weightedPerTurn: turns ? weighted / turns : null, weightedPerRequest: rows.length ? weighted / rows.length : null,
+      cacheHitRatio: inSide ? tok.cache_read / inSide : 0,
+      mainContext: { requests: ctxs.length, median: median(ctxs), p90: quantile(ctxs, 0.9), max: ctxs.length ? Math.max(...ctxs) : 0 },
+      subagentShare: weighted ? subW / weighted : 0,
+      idleResumes: idle, skillListing: listing, agentTypes,
+      _startMs: startMs, _saving: new Map(),
+    };
+    for (const f of shown) {
+      const v = (savingBy.get(f.id) && savingBy.get(f.id).get(sid)) || 0;
+      if (v > 0) s._saving.set(f.id, v);
+    }
+    s.findings = [...s._saving.entries()].map(([id, saving]) => ({ id, saving, ...findingMetric(id, s, largeCount.get(sid) || 0) }));
+    out.push(s);
+  }
+  return out.sort((a, b) => (a._startMs - b._startMs) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/** A finding's own metric in one session summary (see sessionSummaries). */
+function findingMetric(id, s, largeResults) {
+  if (id === 'main-idle') return { resumes: s.idleResumes.resumes, rewriteTokensPerResume: s.idleResumes.resumes ? s.idleResumes.rewriteTokens / s.idleResumes.resumes : null };
+  if (id === 'main-context') return { largeResults, mainContextMedian: s.mainContext.median, mainContextP90: s.mainContext.p90 };
+  if (id === 'skill-listing') return { startChars: s.skillListing.startChars, reinjections: s.skillListing.reinjections };
+  const type = agentTypeOf(id);
+  const a = type != null && s.agentTypes[type];
+  if (a && id.startsWith('agent-tools:')) return { runs: a.runs, startContext: a.startContext, listingReinjections: a.listingReinjections };
+  if (a && id.startsWith('subagent-ttl:')) return { runs: a.runs, write5mShare: a.write5mShare };
+  return {};
+}
+const agentTypeOf = (id) => {
+  const m = /^(agent-tools|subagent-ttl|skill-instead|model):(.*)$/s.exec(id);
+  return m ? m[2] : null;
+};
+
+function publicSummary(s) {
+  const { _startMs, _saving, agentTypes, ...rest } = s;
+  return { ...rest, agentTypes: Object.fromEntries(Object.entries(agentTypes).map(([k, { _firsts, ...a }]) => [k, a])) };
+}
+
+/** Session-level metrics compared by --compare-at: the median over a group's sessions. */
+const COMPARE_METRICS = {
+  requests: (s) => s.requests,
+  turns: (s) => s.turns,
+  weighted: (s) => s.weighted,
+  weightedPerTurn: (s) => s.weightedPerTurn,
+  weightedPerRequest: (s) => s.weightedPerRequest,
+  cacheHitRatio: (s) => s.cacheHitRatio,
+  mainContextMedian: (s) => (s.mainContext.requests ? s.mainContext.median : null),
+  mainContextP90: (s) => (s.mainContext.requests ? s.mainContext.p90 : null),
+  mainContextMax: (s) => (s.mainContext.requests ? s.mainContext.max : null),
+  subagentShare: (s) => s.subagentShare,
+};
+/** Groups with fewer sessions than this make the comparison a rough guide only. */
+export const FEW_SESSIONS = 3;
+
+const medianOf = (g, f) => {
+  const xs = g.map(f).filter((v) => v != null && Number.isFinite(v));
+  return xs.length ? median(xs) : null;
+};
+const ratioOf = (a, b) => (b ? a / b : null);
+const diffOf = (before, after) => Object.fromEntries(Object.keys(before).map((k) => {
+  const b = before[k], a = after[k];
+  const change = a != null && b != null ? a - b : null;
+  return [k, { before: b, after: a, change, changeRatio: change != null && b ? change / b : null }];
+}));
+
+/**
+ * Per-finding metrics for one group of sessions. Every finding gets:
+ *   sessionsWith   sessions in the group where the finding's saving has a positive part
+ *   savingPerTurn  the group's estimated saving for it / the group's turns
+ * and, by kind:
+ *   main-idle      idleResumesPerSession (median), rewriteTokensPerResume (all the group's
+ *                  resumes after > 1 h together)
+ *   main-context   mainContextMedian, mainContextP90 (median over the sessions)
+ *   skill-listing  startListingChars (median over sessions with a listing),
+ *                  reinjectionsPerSession (median over sessions with a main thread)
+ *   agent-tools:T  runs, startContext (median over all the group's runs of T),
+ *                  listingReinjectionsPerRun
+ *   subagent-ttl:T runs, write5mShare (T's 5m writes / all its writes in the group)
+ */
+function findingGroupMetrics(id, g) {
+  const turns = sum(g.map((s) => s.turns));
+  const out = {
+    sessionsWith: g.filter((s) => s._saving.has(id)).length,
+    savingPerTurn: turns ? sum(g.map((s) => s._saving.get(id) || 0)) / turns : null,
+  };
+  if (id === 'main-idle') {
+    const n = sum(g.map((s) => s.idleResumes.resumes));
+    out.idleResumesPerSession = medianOf(g.filter((s) => s.mainContext.requests), (s) => s.idleResumes.resumes);
+    out.rewriteTokensPerResume = n ? sum(g.map((s) => s.idleResumes.rewriteTokens)) / n : null;
+  } else if (id === 'main-context') {
+    out.mainContextMedian = medianOf(g, COMPARE_METRICS.mainContextMedian);
+    out.mainContextP90 = medianOf(g, COMPARE_METRICS.mainContextP90);
+  } else if (id === 'skill-listing') {
+    out.startListingChars = medianOf(g.filter((s) => s.skillListing.startChars), (s) => s.skillListing.startChars);
+    out.reinjectionsPerSession = medianOf(g.filter((s) => s.mainContext.requests), (s) => s.skillListing.reinjections);
+  } else if (id.startsWith('agent-tools:') || id.startsWith('subagent-ttl:')) {
+    const type = agentTypeOf(id);
+    const as = g.map((s) => s.agentTypes[type]).filter(Boolean);
+    const runs = sum(as.map((a) => a.runs));
+    out.runs = runs;
+    if (id.startsWith('agent-tools:')) {
+      const firsts = as.flatMap((a) => a._firsts);
+      out.startContext = firsts.length ? median(firsts) : null;
+      out.listingReinjectionsPerRun = runs ? sum(as.map((a) => a.listingReinjections)) / runs : null;
+    } else {
+      const w5 = sum(as.map((a) => a.write5m)), w1 = sum(as.map((a) => a.write1h));
+      out.write5mShare = ratioOf(w5, w5 + w1);
+    }
+  }
+  return out;
+}
+
+/**
+ * --compare-at: sessions whose first request in range is before `at` vs at or after it. For
+ * each group, the median of COMPARE_METRICS over its sessions; diff = after - before, with
+ * changeRatio = change / before. byFinding covers main-idle, main-context and skill-listing
+ * always, and every other finding above MIN_SHARE (not cut by --top).
+ */
+function compareSessions(full, shown, at) {
+  const groups = { before: full.filter((s) => s._startMs < at), after: full.filter((s) => !(s._startMs < at)) };
+  const side = (g) => ({ sessions: g.length, ids: g.map((s) => s.id),
+    median: Object.fromEntries(Object.entries(COMPARE_METRICS).map(([k, f]) => [k, medianOf(g, f)])) });
+  const before = side(groups.before), after = side(groups.after);
+  const ids = [...new Set(['main-idle', 'main-context', 'skill-listing', ...shown.map((f) => f.id)])];
+  const byFinding = ids.map((id) => {
+    const b = findingGroupMetrics(id, groups.before), a = findingGroupMetrics(id, groups.after);
+    return { id, before: b, after: a, diff: diffOf(b, a) };
+  });
+  return { at: isoString(at), fewSessions: before.sessions < FEW_SESSIONS || after.sessions < FEW_SESSIONS,
+    before, after, diff: diffOf(before.median, after.median), byFinding };
 }
 
 /** Where an agent type's definition is, as far as audit.js could locate it. */
