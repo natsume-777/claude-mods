@@ -1,9 +1,11 @@
 // Shows where the session's tokens go and when a fresh session would be cheaper.
 //
 // register.js  the events: each model request (turn.step) into $.state, which subagent is
-//              which ($.agent.list, classic.SubagentStart, the Agent tool's result), a
-//              finished subagent's requests read back from its transcript, the handoff marker
-//              in a new session's first prompt, the timers, /usage-ledger's registration
+//              which ($.agent.list, classic.SubagentStart, the Agent tool's result), the main
+//              transcript's path and when to read threads back from their transcripts, the
+//              handoff marker in a new session's first prompt, the timers, /usage-ledger's
+//              registration
+// backfill.js  reading a thread's requests back from its transcript
 // pane.js      the pane (one, with views), /usage-ledger, the band above the prompt,
 //              [引き継ぐ…] and [書き出す]
 // export.js    the two files [書き出す] writes, a .md summary and a .jsonl of the requests (pure)
@@ -14,25 +16,27 @@
 // style.js     the shared look (pure)
 // press-guard.js  runs a pane press again that did not reach its Button (pure)
 //
-// Counting starts when the module first loads in a session ("集計開始"): the main thread's
-// transcript is too large to read back, so only what happens from then on is counted.
+// The transcripts are the source of truth. turn.step's live values are provisional ("速報値"):
+// a subagent's are replaced by its transcript when it finishes, the main thread's at the end of
+// each main turn (classic.Stop) and before [書き出す], which also brings in the main requests
+// made before the module loaded. Where the classic hooks do not run (an organisation manages
+// Claude Code), or the main transcript is over 4 MiB or unreadable, counting starts when the
+// module first loads ("集計開始") and the main thread stays live, labelled as such.
 
-import { normalizeStep, contextOf, parseThread } from './aggregate.js'
+import { normalizeStep, contextOf } from './aggregate.js'
 import {
-  MAX_TRANSCRIPT_BYTES,
   HANDOFF_MARK,
   handoffKey,
   setConfig,
   getConfig,
   setObserved,
   getObserved,
-  appendRequest,
-  replaceThread,
-  parseJsonl,
+  addLive,
   summarize,
   assumed,
 } from './ledger.js'
 import { registerPane } from './pane.js'
+import { notePath, backfillSubagent, backfillMain } from './backfill.js'
 import { update } from 'claude-code'
 
 // The state this file writes (declared in types/index.d.ts)
@@ -88,12 +92,43 @@ export function register(on, options) {
 
   // One model request, of the main thread or a subagent; its result goes on unchanged
   on('turn.step', async function* ($, e, next) {
+    let sentAt = null
+    try {
+      sentAt = await $.clock.now()
+    } catch {}
     const result = yield* next(e)
     try {
-      await recordStep($, e, result)
+      await recordStep($, e, result, sentAt)
     } catch {}
     return result
   })
+
+  // The main transcript's path, from the classic hooks that carry it on the main thread
+  on('classic.SessionStart', async ($, e, next) => {
+    try {
+      await notePath($, e)
+    } catch {}
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    try {
+      await notePath($, e)
+    } catch {}
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // A main turn ended: the main thread's requests read back from its transcript
+  on('classic.Stop', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      if (!e.agent_id) {
+        await notePath($, e)
+        await readBackMain($)
+      }
+    } catch {}
+    return result
+  }).catch(($, e, next) => next(e))
 
   // A subagent starts: its type
   on('classic.SubagentStart', async ($, e, next) => {
@@ -123,7 +158,8 @@ export function register(on, options) {
   on('classic.SubagentStop', async ($, e, next) => {
     const result = await next(e)
     try {
-      await backfill($, e.agent_id, e.agent_type, e.agent_transcript_path)
+      await noteThread($, e.agent_id, { agentType: e.agent_type })
+      if (typeof e.agent_id === 'string') await backfillSubagent($, e.agent_id, e.agent_transcript_path)
     } catch {}
     return result
   })
@@ -144,11 +180,13 @@ export function register(on, options) {
 
 // ---- The live tally
 
-async function recordStep($, e, result) {
+async function recordStep($, e, result, sentAt) {
   const now = await $.clock.now()
-  const request = normalizeStep(e, result, now, getConfig())
-  if (!request) return
-  await update($, REQUESTS, (list) => appendRequest(list, request))
+  const step = normalizeStep(e, result, now, getConfig())
+  if (!step) return
+  // When it was sent: a read-back keeps the live requests its transcript does not have yet
+  const request = typeof sentAt === 'number' ? { ...step, sentAt } : step
+  await update($, REQUESTS, (list) => addLive(list, request))
   if (request.thread !== 'main') {
     if (!looked.has(request.thread)) {
       looked.add(request.thread)
@@ -231,22 +269,11 @@ async function noteThread($, agentId, patch) {
   await update($, THREADS, (threads) => ({ ...(threads ?? {}), [agentId]: { ...(threads ?? {})[agentId], ...clean } }))
 }
 
-async function backfill($, agentId, agentType, path) {
-  if (typeof agentId !== 'string') return
-  await noteThread($, agentId, { agentType })
-  if (typeof path !== 'string' || path === '') return
-  try {
-    const stat = await $.fs.stat(path)
-    if (typeof stat?.size === 'number' && stat.size > MAX_TRANSCRIPT_BYTES) return
-  } catch {
-    return
-  }
-  const text = await $.fs.read(path)
-  const parsed = parseThread(parseJsonl(text))
-  if (parsed.requests.length === 0) return
-  const requests = parsed.requests.map((q) => ({ id: String(q.id), ts: q.ts, model: q.model, tools: q.tools, tok: q.tok, thread: agentId }))
-  await update($, REQUESTS, (list) => replaceThread(list, agentId, requests))
-  await update($, THREADS, (threads) => ({ ...(threads ?? {}), [agentId]: { ...(threads ?? {})[agentId], isBackfilled: true } }))
+// The main thread read back; the cache's edges follow its last request's time
+async function readBackMain($) {
+  if (!(await backfillMain($))) return
+  const { value: requests } = await $.state.get(REQUESTS)
+  scheduleEdges($, requests ?? [], await $.clock.now())
 }
 
 // ---- Handoff

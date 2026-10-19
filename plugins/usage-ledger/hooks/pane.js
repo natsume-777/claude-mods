@@ -41,11 +41,13 @@ import {
   handoffId,
   handoffFile,
   handoffDraft,
+  mainSourceOf,
 } from './ledger.js'
-import { SPACE, COLOR, BUTTON, choice, dim, inline, cell, slot, tableRow, field, section, details, page } from './style.js'
+import { SPACE, COLOR, BUTTON, choice, dim, inline, cell, slot, tableRow, field, fieldsFor, isStacked, stackedField, section, details, page } from './style.js'
 import { fitMeter, meterParts, cells } from './meter.js'
 import { exportPaths, exportMarkdown, exportJsonl, promptLine } from './export.js'
 import { GRACE_MS, guardDrawing, beginPress, hasStarted, takeOver, endPress } from './press-guard.js'
+import { backfillMain } from './backfill.js'
 import { atom, read, update } from 'claude-code'
 
 // The state this file reads and writes (declared in types/index.d.ts)
@@ -56,6 +58,8 @@ const STARTED_AT = { plugin: 'usage-ledger', key: 'startedAt' }
 const OPEN = { plugin: 'usage-ledger', key: 'open' }
 const HANDOFF = { plugin: 'usage-ledger', key: 'handoff' }
 const INCOMING = { plugin: 'usage-ledger', key: 'incoming' }
+const TRANSCRIPT = { plugin: 'usage-ledger', key: 'transcriptPath' }
+const MAIN_SOURCE = { plugin: 'usage-ledger', key: 'mainSource' }
 
 const TITLE = 'トークンの内訳'
 const TYPE_LABEL = { input: '入力', cache_read: 'キャッシュ読み', cache_write_5m: '書き 5m', cache_write_1h: '書き 1h', output: '出力' }
@@ -114,13 +118,20 @@ async function cancelHandoff($) {
 
 // Writes the session's numbers to the export folder (export.js: a .md summary and a .jsonl of
 // the requests, the pair overwritten on each press), then names the .md in a toast and in a
-// line added to the prompt box (never sent). Nothing goes into $.state, so nothing redraws.
+// line added to the prompt box (never sent). The main thread is read back from its transcript
+// first (backfill.js), the only part that writes $.state and so redraws.
 async function exportData($) {
+  try {
+    await backfillMain($)
+  } catch {}
   const now = await $.clock.now()
   const tz = localOffsetMinutes()
   const { value: requests = [] } = await $.state.get(REQUESTS)
   const { value: threads = {} } = await $.state.get(THREADS)
   const { value: startedAt } = await $.state.get(STARTED_AT)
+  const { value: transcriptPath } = await $.state.get(TRANSCRIPT)
+  const { value: mainSource } = await $.state.get(MAIN_SOURCE)
+  const main = mainSourceOf(mainSource, { hasPath: typeof transcriptPath === 'string' && transcriptPath !== '', tzOffsetMinutes: tz })
   const sessionId = await $.session.id()
   const paths = exportPaths({
     dir: getConfig().exportDir,
@@ -131,7 +142,7 @@ async function exportData($) {
   })
   const jsonlName = paths.name + '.jsonl'
   try {
-    await $.fs.write(paths.md, exportMarkdown({ requests, threads, startedAt, now, tzOffsetMinutes: tz, sessionId, jsonlName }))
+    await $.fs.write(paths.md, exportMarkdown({ requests, threads, startedAt, now, tzOffsetMinutes: tz, sessionId, jsonlName, main }))
     await $.fs.write(paths.jsonl, exportJsonl(requests, threads, tz))
   } catch (error) {
     $.ui.toast(`集計を書き出せませんでした（${paths.shown.md}）: ${String(error?.message ?? error)}`)
@@ -155,17 +166,46 @@ async function gather($, e) {
   const { value: open = '' } = await $.state.get({ ...OPEN, id: current })
   const { value: handoff = null } = await $.state.get(HANDOFF)
   const { value: incoming = null } = await $.state.get(INCOMING)
+  const { value: transcriptPath } = await $.state.get(TRANSCRIPT)
+  const { value: mainSource } = await $.state.get(MAIN_SOURCE)
   const now = await $.clock.now()
   const tz = localOffsetMinutes()
+  const main = mainSourceOf(mainSource, { hasPath: typeof transcriptPath === 'string' && transcriptPath !== '', tzOffsetMinutes: tz })
   const agg = aggregateThreads(toThreads(requests, threads), { tzOffsetMinutes: tz, top: 15 })
   const s = summarize(requests, now, { handoff: handoff?.status })
   // The pane is not told whether a turn runs: the idle warning is left to the band
   const g = gauge(s, { isWorking: true })
-  return { view: current, requests, threads, startedAt, open, handoff, incoming, now, tz, agg, s, g, surface: e.surface, width: widthOf(e) ?? 84 }
+  return { view: current, requests, threads, startedAt, open, handoff, incoming, main, now, tz, agg, s, g, surface: e.surface, width: widthOf(e) ?? 84 }
+}
+
+// The cells a section's body has across, and a row's details (inside the page's padding and
+// the section's indent, the details indented again)
+const bodyRoom = (d) => d.width - 2 * SPACE.page - SPACE.indent
+const detailsRoom = (d) => bodyRoom(d) - 2 * SPACE.indent
+
+// What the totals cover: once the main thread was read back, the whole session, else from
+// when counting started; and which of main is still provisional (null: none)
+function scopeOf(d) {
+  return {
+    scope: d.main.isBackfilled ? 'セッション全体' : typeof d.startedAt === 'number' ? '集計開始 ' + clockOf(d.startedAt, d.tz) : '集計開始 —',
+    live: d.main.live ? `${d.main.live}は速報値` : null,
+  }
+}
+
+// The line under the title. When it is wider than the pane, its parts go one a line (the
+// scope and the provisional part together when they fit), never cut at the edge.
+function headerAbout(ui, d) {
+  const { scope, live } = scopeOf(d)
+  const counts = `要求 ${d.agg.total.requests} 回 · 重み計 ${short(d.agg.total.weighted)}*`
+  const first = scope + (live ? `（${live}）` : '')
+  const line = `${first} · ${counts}`
+  const room = d.width - 2 * SPACE.page
+  if (cells(line) <= room) return dim(ui, 'header-about', line)
+  const parts = cells(first) <= room ? [first, counts] : [scope, live, counts].filter(Boolean)
+  return ui.Box({ key: 'header-about', flexDirection: 'column', width: '100%', children: parts.map((t, i) => dim(ui, 'header-about-' + i, t)) })
 }
 
 function drawHeader($, ui, d) {
-  const started = typeof d.startedAt === 'number' ? '集計開始 ' + clockOf(d.startedAt, d.tz) : '集計開始 —'
   const nav = VIEWS.map((v) =>
     ui.Button({ key: 'view-' + v.id, label: v.label, ...choice(d.view === v.id), onPress: () => go($, v.id) }),
   )
@@ -176,7 +216,7 @@ function drawHeader($, ui, d) {
     width: '100%',
     children: [
       ui.Text({ bold: true, children: [TITLE] }),
-      dim(ui, 'header-about', `${started} · 要求 ${d.agg.total.requests} 回 · 重み計 ${short(d.agg.total.weighted)}*`),
+      headerAbout(ui, d),
       inline(ui, 'header-nav', nav, 1),
     ],
   })
@@ -227,7 +267,7 @@ function drawStatus($, ui, d) {
     lines.push(ui.Box({ key: 'status-what', children: [ui.Text({ wrap: 'wrap', ...(g.stage === 'ok' ? {} : { bold: true }), children: [what] })] }))
     lines.push(ui.Box({ key: 'status-todo', children: [ui.Text({ wrap: 'wrap', children: [todo] })] }))
   }
-  if (d.handoff) lines.push(field(ui, 'status-handoff-state', '引き継ぎ', handoffState(d.handoff), 10))
+  if (d.handoff) lines.push(fieldsFor(bodyRoom(d))(ui, 'status-handoff-state', '引き継ぎ', handoffState(d.handoff), 10))
 
   const actions = []
   if (d.handoff?.status === 'drafted') {
@@ -242,16 +282,28 @@ function drawStatus($, ui, d) {
 }
 
 // ----- 概要 -----
+// The main thread's 数え方: the sentence beside its name, or on a narrow pane its short label
+// under the name and the rest of it as a dim line below
+function methodField(ui, key, name, main, width, room) {
+  if (!isStacked(room, width, main.method)) return field(ui, key, name, main.method, width)
+  return stackedField(ui, key, name, main.label, {}, main.note ? [dim(ui, key + '-note', main.note)] : [])
+}
+
 function drawOverview($, ui, d) {
   const { s, agg } = d
+  const room = bodyRoom(d)
+  const field = fieldsFor(room)
   const be = s.breakEven
   const { freshCtx, baseCtx } = assumed()
   const obs = getObserved()
   const now = []
   if (s.context == null) {
-    now.push(dim(ui, 'now-empty', 'まだ主スレッドの要求がありません。集計開始より後の要求だけを数えます'))
+    now.push(dim(ui, 'now-empty', d.main.isBackfilled ? 'まだ主スレッドの要求がありません' : 'まだ主スレッドの要求がありません。今は集計開始より後の要求だけを数えます（速報値）'))
   } else {
-    now.push(field(ui, 'now-ctx', '主の文脈', `${short(s.context)}（${modelShort(s.model)}）`, 18, s.isHeavy ? { color: COLOR.warn } : {}))
+    // The model goes when even the line under the name is too narrow for it
+    const ctx = `${short(s.context)}（${modelShort(s.model)}）`
+    const ctxShown = isStacked(room, 18, ctx) && cells(ctx) > room - SPACE.indent ? short(s.context) : ctx
+    now.push(field(ui, 'now-ctx', '主の文脈', ctxShown, 18, s.isHeavy ? { color: COLOR.warn } : {}))
     now.push(
       field(
         ui,
@@ -281,6 +333,7 @@ function drawOverview($, ui, d) {
     field(ui, 'total-weighted', '重み*', `${short(agg.total.weighted)}（主 ${pct(main.weighted, agg.total.weighted)}・サブ ${pct(subs.weighted, agg.total.weighted)}）`),
     field(ui, 'total-hit', 'キャッシュ読みの割合', pct(agg.total.cacheHitRatio, 1)),
     field(ui, 'total-expired', '期限切れ後の再書込', `${tax.requests} 回 · 重み ${short(tax.weighted)}*（全体の ${pct(tax.weighted, agg.total.weighted)}）`),
+    methodField(ui, 'total-main-source', '主の数え方', d.main, 18, room),
   ]
 
   const typeRows = [
@@ -295,9 +348,19 @@ function drawOverview($, ui, d) {
     ),
   ]
 
+  // The totals' heading says which of main is provisional; when the heading is wider than the
+  // pane, that part becomes the section's first line
+  const { live } = scopeOf(d)
+  const totalsName = d.main.isBackfilled ? 'セッション全体の合計' : '集計開始からの合計'
+  const totalsNote = live ?? '主は記録から読み直した値'
+  const totalsTitle = `${totalsName}（${totalsNote}）`
+  const isTitleNarrow = cells(totalsTitle) > d.width - 2 * SPACE.page
+
   return [
     section(ui, 'now', '今の文脈', now),
-    section(ui, 'totals', '集計開始からの合計', totals),
+    isTitleNarrow
+      ? section(ui, 'totals', totalsName, [dim(ui, 'totals-note', totalsNote), ...totals])
+      : section(ui, 'totals', totalsTitle, totals),
     section(ui, 'types', 'トークンの種類別', typeRows),
     dim(ui, 'weights-note', WEIGHTS_NOTE),
     section(ui, 'export', '書き出し', [
@@ -379,6 +442,7 @@ function drawThreads($, ui, d) {
     )
     if (d.open === t.key) {
       const span = t.start != null ? `${clockOf(t.start, d.tz)}–${clockOf(t.end, d.tz)}` : '—'
+      const field = fieldsFor(detailsRoom(d))
       rows.push(
         details(ui, keyOf('thread-details', t.key), [
           t.description ? field(ui, 'd-desc', '説明', t.description, 14) : null,
@@ -390,13 +454,9 @@ function drawThreads($, ui, d) {
           field(ui, 'd-span', '期間', span, 14),
           field(ui, 'd-ctx', '文脈', `初回 ${short(t.firstContext)} → 最後 ${short(t.lastContext)}`, 14),
           field(ui, 'd-tok', 'トークン', tokLine(t.tok), 14),
-          field(
-            ui,
-            'd-source',
-            '数え方',
-            t.key === 'main' ? 'ライブ（書き込みの 5m / 1h は設定で振り分け）' : meta.isBackfilled ? '終了後に記録から読み直した' : 'ライブ（書き込みの 5m / 1h は設定で振り分け）',
-            14,
-          ),
+          t.key === 'main'
+            ? methodField(ui, 'd-source', '数え方', d.main, 14, detailsRoom(d))
+            : field(ui, 'd-source', '数え方', meta.isBackfilled ? '終了後に記録から読み直した' : 'ライブ（書き込みの 5m / 1h は設定で振り分け）', 14),
         ]),
       )
     }
@@ -462,6 +522,7 @@ function drawCostly($, ui, d) {
       ]),
     )
     if (d.open === rowKey) {
+      const field = fieldsFor(detailsRoom(d))
       rows.push(
         details(ui, keyOf('costly-details', i), [
           field(ui, 'd-model', 'モデル', modelShort(q.model), 14),
@@ -479,6 +540,7 @@ function drawGaps($, ui, d) {
   const { agg } = d
   const label = Object.fromEntries(agg.threads.map((t) => [t.key, t.label]))
   const tax = agg.gapTax
+  const field = fieldsFor(bodyRoom(d))
   const summary = [
     field(ui, 'gap-expired', '期限切れの後', `${tax.expired.requests} 回 · 書込 ${short(tax.expired.write)} · 重み ${short(tax.expired.weighted)}*（全体の ${pct(tax.expired.weighted, agg.total.weighted)}）`),
     field(ui, 'gap-within', '期限内', `${tax.within.requests} 回 · 書込 ${short(tax.within.write)} · 重み ${short(tax.within.weighted)}*`),
@@ -537,6 +599,7 @@ function drawTools($, ui, d) {
 // ----- 引き継ぎ -----
 function drawHandoff($, ui, d) {
   const { freshCtx, baseCtx } = assumed()
+  const field = fieldsFor(bodyRoom(d))
   const blocks = [
     dim(
       ui,
