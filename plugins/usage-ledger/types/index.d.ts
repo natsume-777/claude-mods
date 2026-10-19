@@ -12,7 +12,7 @@ export type UsageLedgerTokens = {
 
 /**
  * One model request: `id` is `turnId:index` (live) or the response's message id (read back
- * from a subagent's transcript), `ts` epoch ms, `thread` 'main' or the subagent's agentId.
+ * from the thread's transcript), `ts` epoch ms, `thread` 'main' or the subagent's agentId.
  */
 export type UsageLedgerRequest = {
   id: string
@@ -21,6 +21,10 @@ export type UsageLedgerRequest = {
   tools: string[]
   tok: UsageLedgerTokens
   thread: string
+  /** 'transcript' when read back from the transcript; unset for a live one (turn.step). */
+  src?: 'transcript'
+  /** A live one: when its step started, epoch ms. */
+  sentAt?: number
 }
 
 /** What is known of a subagent, by its agentId. */
@@ -29,6 +33,18 @@ export type UsageLedgerThread = {
   description?: string
   /** True once its requests were replaced by the ones its transcript records. */
   isBackfilled?: boolean
+}
+
+/**
+ * How the main thread was last read back from its transcript. Unset before the first try.
+ * `reason` null: the last try worked; else why it did not ('empty': no request in it yet).
+ */
+export type UsageLedgerMainSource = {
+  /** When the last read-back that worked was, epoch ms; null when none has. */
+  backfilledAt: number | null
+  /** How many requests that read-back found. */
+  requests: number
+  reason: 'tooLarge' | 'unreadable' | 'empty' | null
 }
 
 /** The pane's views. */
@@ -58,12 +74,19 @@ export type UsageLedgerIncoming = {
 declare module 'claude-code' {
   interface PluginState {
     'usage-ledger': {
-      /** Every request seen since `startedAt`, oldest first, capped. Unset before the first. */
+      /**
+       * The requests: the transcripts' once read back (the whole session's for main), else
+       * every one seen since `startedAt`; oldest first, capped. Unset before the first.
+       */
       requests: UsageLedgerRequest[]
       /** Subagents by agentId. */
       threads: Record<string, UsageLedgerThread>
       /** When counting started (the first load in this session), epoch ms. */
       startedAt: number
+      /** The main thread's transcript, absolute, as the classic hooks name it. Unset when none did. */
+      transcriptPath: string
+      /** Unset before the main thread was first tried to be read back. */
+      mainSource: UsageLedgerMainSource
       /** Unset means 'status'. */
       view: UsageLedgerView
       /** The row whose details are open, by view; '' or unset means none. */

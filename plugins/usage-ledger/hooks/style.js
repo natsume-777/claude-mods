@@ -2,6 +2,8 @@
 // the recurring blocks (a header, a section, a table row, a key/value field). Pure: each
 // builder takes the element table `$.ui.resolve(e)` handed out (`ui`) and never touches $.
 
+import { cells } from './meter.js'
+
 /** Spacing, in character cells. */
 export const SPACE = {
   page: 1, // the left and right padding of the pane
@@ -69,6 +71,39 @@ export const field = (ui, key, name, value, width = 18, props = {}) =>
       ui.Box({ flexGrow: 1, flexShrink: 1, children: [ui.Text({ wrap: 'wrap', ...props, children: [value] })] }),
     ],
   })
+
+// The least cells a field's value keeps beside its name; with less, a value too long for one
+// line goes under its name instead of wrapping a few characters a line
+const FIELD_MIN = 20
+
+/**
+ * Whether a field whose name column is `width` cells goes under its name in a body `room`
+ * cells wide (null: unknown, kept beside).
+ */
+export const isStacked = (room, width, value) => {
+  if (room == null) return false
+  const beside = room - width - SPACE.column
+  return beside < FIELD_MIN && cells(value) > beside
+}
+
+/**
+ * A key/value field under its name, for a narrow pane: the name dim on its own line, the value
+ * under it at the full width, indented; `extra` (such as a dim note) under the value.
+ */
+export const stackedField = (ui, key, name, value, props = {}, extra = []) =>
+  ui.Box({
+    key,
+    flexDirection: 'column',
+    width: '100%',
+    children: [
+      ui.Text({ dimColor: true, children: [name] }),
+      ui.Box({ flexDirection: 'column', paddingLeft: SPACE.indent, width: '100%', children: [ui.Text({ wrap: 'wrap', ...props, children: [value] }), ...extra] }),
+    ],
+  })
+
+/** `field` for a body `room` cells wide: beside its name, or under it when narrow (isStacked). */
+export const fieldsFor = (room) => (ui, key, name, value, width = 18, props = {}) =>
+  isStacked(room, width, value) ? stackedField(ui, key, name, value, props) : field(ui, key, name, value, width, props)
 
 /** A section: a bold heading, then its body indented under it. */
 export const section = (ui, key, title, children) =>

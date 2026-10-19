@@ -6,7 +6,7 @@
 // model ids, tool names, agent types and the Agent tool's short descriptions only.
 
 import { aggregateThreads, TYPES, isoString, modelWeight, DEFAULT_WEIGHTS } from './aggregate.js'
-import { MAX_REQUESTS, WEIGHTS_NOTE, ESTIMATE_NOTE, getConfig, summarize, toThreads, duration } from './ledger.js'
+import { MAX_REQUESTS, WEIGHTS_NOTE, ESTIMATE_NOTE, getConfig, summarize, toThreads, duration, mainSourceOf } from './ledger.js'
 
 /** The skill that explains the files' format. */
 export const SKILL = 'usage-ledger-data'
@@ -15,7 +15,7 @@ export const SKILL = 'usage-ledger-data'
 export const SECTIONS = ['概要', 'スレッド', '種類とモデル', '高い要求', '主のツール', '待ちと再書込']
 
 /** The .jsonl's fields, in the order each line writes them. */
-export const JSONL_FIELDS = ['ts', 'thread', 'agentType', 'description', 'model', ...TYPES, 'context', 'weight', 'tools']
+export const JSONL_FIELDS = ['ts', 'id', 'thread', 'agentType', 'description', 'model', ...TYPES, 'context', 'weight', 'tools', 'src']
 
 // ---- Names and paths
 
@@ -75,8 +75,9 @@ const contextOf = (t) => (t.input || 0) + (t.cache_read || 0) + (t.cache_write_5
 // ---- The two files
 
 /**
- * The .jsonl: one line per request, oldest first, the subagents' read-back requests as they
- * are in state. metas: $.state `threads`.
+ * The .jsonl: one line per request, oldest first, as they are in state. `id` is the response's
+ * message id for a request read back from its transcript (`src` 'transcript'), `turnId:index`
+ * for a live one (`src` 'live'). metas: $.state `threads`.
  */
 export function exportJsonl(requests, metas, tzOffsetMinutes = 0) {
   const lines = [...(requests ?? [])]
@@ -87,6 +88,7 @@ export function exportJsonl(requests, metas, tzOffsetMinutes = 0) {
       const tok = Object.fromEntries(TYPES.map((t) => [t, q.tok?.[t] || 0]))
       return JSON.stringify({
         ts: isoLocal(q.ts, tzOffsetMinutes),
+        id: String(q.id ?? ''),
         thread: isMain ? 'main' : String(q.thread),
         agentType: isMain ? '(主)' : meta.agentType || '?',
         description: isMain ? '' : meta.description || '',
@@ -95,6 +97,7 @@ export function exportJsonl(requests, metas, tzOffsetMinutes = 0) {
         context: contextOf(tok),
         weight: Math.round(weightOf(tok, q.model)),
         tools: Array.isArray(q.tools) ? q.tools.map(String) : [],
+        src: q.src === 'transcript' ? 'transcript' : 'live',
       })
     })
   return lines.length ? lines.join('\n') + '\n' : ''
@@ -102,7 +105,8 @@ export function exportJsonl(requests, metas, tzOffsetMinutes = 0) {
 
 /**
  * The .md summary. d: { requests, threads (metas), startedAt, now, tzOffsetMinutes, sessionId,
- * jsonlName (the .jsonl's file name, mentioned at the top) }
+ * jsonlName (the .jsonl's file name, mentioned at the top), main (ledger.js mainSourceOf; unset
+ * means not read back) }
  */
 export function exportMarkdown(d) {
   const tz = d.tzOffsetMinutes ?? 0
@@ -116,7 +120,16 @@ export function exportMarkdown(d) {
   out.push('# usage-ledger の集計', '')
   out.push(`この形式の説明は、スキル ${SKILL} にあります。`, '')
   out.push(`- 書き出し: ${when(d.now, tz)}（${isoLocal(d.now, tz).slice(23)}）`)
-  out.push(`- 集計範囲: 集計開始 ${when(d.startedAt, tz)} から書き出しまで。集計開始は usage-ledger が読み込まれた時刻で、それより前の主スレッドの要求は含まない`)
+  const source = d.main ?? mainSourceOf(null)
+  if (source.isBackfilled && source.isCurrent) {
+    out.push(`- 集計範囲: セッション全体から書き出しまで（主スレッドは記録から読み直した値、${when(source.at, tz)} に読み直した）`)
+  } else if (source.isBackfilled) {
+    // Read back once, not since: main after that read-back is provisional
+    out.push(`- 集計範囲: セッション全体から書き出しまで（主スレッドは ${when(source.at, tz)} までは記録から読み直した値、それより後は速報値）`)
+  } else {
+    out.push(`- 集計範囲: 集計開始 ${when(d.startedAt, tz)} から書き出しまで。集計開始は usage-ledger が読み込まれた時刻で、それより前の主スレッドの要求は含まない`)
+  }
+  out.push(`- 主スレッドの数え方: ${source.method}`)
   if (requests.length >= MAX_REQUESTS) out.push(`- 要求は新しい ${MAX_REQUESTS} 件だけを残している（古いものは捨てた）`)
   out.push(`- セッション: ${d.sessionId ?? '—'}`)
   if (d.jsonlName) out.push(`- 要求ごとの記録: ${d.jsonlName}（1 行 1 要求）`)

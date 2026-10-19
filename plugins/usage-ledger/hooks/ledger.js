@@ -4,7 +4,7 @@
 //
 // Pure: no $ here, so the hook files keep every $ call themselves.
 
-import { summaryForBand, contextForRuns, IDLE_WARN_MS, isoString } from './aggregate.js'
+import { summaryForBand, contextForRuns, IDLE_WARN_MS, isoString, clockOf } from './aggregate.js'
 
 /** The pane's id ($.ui.open, the Pane matcher) and the slash command's name. */
 export const PANE = 'usage-ledger'
@@ -12,7 +12,7 @@ export const PANE = 'usage-ledger'
 /** At most this many requests are kept in $.state; the oldest go first. */
 export const MAX_REQUESTS = 5000
 
-/** A subagent transcript larger than this is not read back ($.fs.read refuses over 4 MiB). */
+/** A transcript (main or subagent) larger than this is not read back ($.fs.read refuses over 4 MiB). */
 export const MAX_TRANSCRIPT_BYTES = 4 * 1024 * 1024
 
 /** Always shown beside a weighted figure. */
@@ -148,6 +148,101 @@ export function appendRequest(list, request) {
 export function replaceThread(list, thread, requests) {
   const next = [...(list ?? []).filter((q) => q.thread !== thread), ...requests].sort((a, b) => a.ts - b.ts)
   return next.length > MAX_REQUESTS ? next.slice(next.length - MAX_REQUESTS) : next
+}
+
+/**
+ * One thread's requests as parseThread read them from its transcript, in the shape $.state
+ * keeps: the response's message id as `id`, the exact 5m / 1h split, `src` 'transcript'.
+ */
+export function transcriptRequests(parsed, thread) {
+  return (parsed ?? []).map((q) => ({ id: String(q.id), ts: q.ts, model: q.model, tools: q.tools, tok: q.tok, thread, src: 'transcript' }))
+}
+
+// When a live main request was sent: `sentAt` (the step's start), else its `ts`
+const sentOf = (q) => (typeof q.sentAt === 'number' ? q.sentAt : q.ts)
+
+/**
+ * The main thread's requests replaced by `requests`, the ones its transcript records. A live
+ * main request stays only when it was sent after the newest of them started, so it is one the
+ * transcript does not have yet; every request the transcript has started after its step was
+ * sent (the main thread makes one request at a time), so none is counted twice.
+ */
+export function mergeMain(list, requests) {
+  let newest = -Infinity
+  for (const q of requests) if (Number.isFinite(q.ts) && q.ts > newest) newest = q.ts
+  const live = (list ?? []).filter((q) => q.thread === 'main' && q.src !== 'transcript' && sentOf(q) > newest)
+  return replaceThread(list, 'main', [...requests, ...live])
+}
+
+/**
+ * Adds one live request. A main request whose response the transcript already had when it was
+ * last read (a read-back request that started after this step was sent: read mid-response, its
+ * output not final yet) is not added again; that request takes the larger output instead.
+ */
+export function addLive(list, request) {
+  if (request.thread === 'main') {
+    const at = sentOf(request)
+    const i = (list ?? []).findIndex((q) => q.thread === 'main' && q.src === 'transcript' && q.ts >= at)
+    if (i >= 0) {
+      const next = [...list]
+      const q = next[i]
+      next[i] = {
+        ...q,
+        tok: { ...q.tok, output: Math.max(q.tok.output || 0, request.tok.output || 0) },
+        tools: (q.tools ?? []).length >= request.tools.length ? q.tools : request.tools,
+      }
+      return next
+    }
+  }
+  return appendRequest(list, request)
+}
+
+// Why the main thread was not read back, as a sentence
+const MAIN_REASON = {
+  noPath: '記録の場所が分からないため、読み直せない',
+  tooLarge: '記録が 4 MiB を超えるため、読み直せない',
+  unreadable: '記録を読めなかった',
+  pending: 'ターンが終わると、記録から読み直す',
+}
+
+/**
+ * How the main thread is counted, for the pane and the export. source: $.state `mainSource`
+ * (unset before the first read-back was tried); hasPath: whether the transcript's path is known.
+ *   isBackfilled  read back from the transcript at least once: the totals cover the session
+ *   isCurrent     and the last read-back worked
+ *   method        the sentence for 数え方
+ *   label, note   the same split for a narrow pane: a short label, and the rest (may be '')
+ *   live          which of main is provisional (速報値), for the totals' headings: null when
+ *                 none is, else 'HH:MM 以降の主' after a read-back that stopped, else '主'
+ */
+export function mainSourceOf(source, { hasPath = false, tzOffsetMinutes = 0 } = {}) {
+  const at = typeof source?.backfilledAt === 'number' ? source.backfilledAt : null
+  const reasonKey = source?.reason && MAIN_REASON[source.reason] ? source.reason : source?.reason === 'empty' || hasPath ? 'pending' : 'noPath'
+  const reason = MAIN_REASON[reasonKey]
+  if (at != null && !source.reason) {
+    return { isBackfilled: true, isCurrent: true, at, live: null, method: '記録から読み直した（ターンの終わりごと）', label: '記録から（ターンごと）', note: '' }
+  }
+  if (at != null) {
+    const t = clockOf(at, tzOffsetMinutes)
+    return {
+      isBackfilled: true,
+      isCurrent: false,
+      at,
+      live: `${t} 以降の主`,
+      method: `${t} までは記録から読み直した値、その後は速報値（記録と未照合）。${reason}`,
+      label: `${t} まで記録・以降は速報値`,
+      note: `速報値は記録と未照合。${reason}`,
+    }
+  }
+  return {
+    isBackfilled: false,
+    isCurrent: false,
+    at: null,
+    live: '主',
+    method: `速報値（記録と未照合）。${reason}。書き込みの 5m / 1h は設定で振り分け`,
+    label: '速報値',
+    note: `記録と未照合。${reason}。書き込みの 5m / 1h は設定で振り分け`,
+  }
 }
 
 /** A JSONL text as records; a line that does not parse (a partial last line) is skipped. */
