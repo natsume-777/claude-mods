@@ -119,6 +119,26 @@ TTL は 5 分と 1 時間の 2 種類だけで、1 時間より長くはでき�
 
 大きな Read や Bash の結果は、そのあと会話が続く限り、毎回読み込まれます。読む範囲を絞る（行の範囲、grep）、調べ物を軽いエージェントに任せる、といった直し方を勧めます。
 
+## 直したあとの比べ方
+
+`--by-session` の `perSession` と `--compare-at` の `compare` の数字は、どれも範囲の中のリクエストだけで数えます。
+
+- ターン（`turns`）は、メインの会話で、利用者が新しく頼んで始まったやり取りの数です。セッションの最初のリクエストと、前のやり取りが終わったあとのプロンプトで始まったリクエストを数えます。ツールが動いている途中に送ったプロンプトは、そのやり取りの一部として数えます
+- 作業の量はセッションごとに違うので、ターンあたり（`weightedPerTurn`）とリクエストあたり（`weightedPerRequest`）の重みで比べます
+- 所見の `saving` はセッションごとに分けられます。`perSession[].findings` に、そのセッションでの見込みの節約量と、その所見の指標が出ます。`compare.byFinding[]` の `savingPerTurn` は、群ごとの見込みの節約量をターンの数で割ったものです
+
+所見ごとに、前後で見る指標は次のとおりです（`compare.byFinding[]`）。
+
+| 所見 | 見る指標 |
+| --- | --- |
+| `main-idle` | `rewriteTokensPerResume`（1 時間以上あけた再開 1 回あたりの書き直し）、`idleResumesPerSession`（その再開の回数） |
+| `main-context` | `mainContextMedian`、`mainContextP90`（メインの文脈の中央値と、大きいほうから 10% の境目） |
+| `agent-tools:<エージェント>` | `startContext`（起動時の文脈）、`listingReinjectionsPerRun`（スキルの一覧が入り直した回数） |
+| `skill-listing` | `startListingChars`（開始時の一覧の文字数）、`reinjectionsPerSession` |
+| `subagent-ttl:<エージェント>` | `write5mShare`（そのエージェントの書き込みのうち 5 分キャッシュの割合。`cacheTtl: 1h` が効けば 0 に近づく） |
+
+どの所見にも、`sessionsWith`（その所見が当てはまったセッションの数）と `savingPerTurn` が付きます。
+
 ## 並列か一括か
 
 同じ種類の小さな作業をいくつか、エージェントに任せるときの目安です。

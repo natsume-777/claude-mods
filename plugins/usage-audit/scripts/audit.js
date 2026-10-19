@@ -3,12 +3,18 @@
 // weighs on the usage limits, and proposes fixes ranked by estimated saving.
 //
 //   node audit.js [--project DIR | --all-projects] [--session ID]... [--since YYYY-MM-DD]
-//                 [--until YYYY-MM-DD] [--tz local|utc] [--top N] [--json]
+//                 [--until YYYY-MM-DD] [--tz local|utc] [--top N] [--by-session]
+//                 [--compare-at DATETIME] [--json]
 //
 // --project defaults to <config>/projects/<cwd with every non-alphanumeric character replaced
 // by '-'>, where <config> is CLAUDE_CONFIG_DIR or ~/.claude. --since/--until are calendar days
 // in --tz (default local), both inclusive. --session takes a session id or a prefix of one and
 // can be repeated.
+// --by-session adds one summary per session (perSession; not cut by --top).
+// --compare-at implies --by-session and splits the sessions by the time of their first request
+// in range into before and after DATETIME, with the median of each metric per group and the
+// difference (compare). DATETIME is YYYY-MM-DD, YYYY-MM-DDTHH:MM or YYYY-MM-DDTHH:MM:SS, with
+// an optional zone (Z, +09:00); without a zone it is in --tz.
 //
 // Prints counts, tool names, agent types, model names, file basenames and session id prefixes
 // only; never conversation text.
@@ -17,29 +23,37 @@ import os from 'node:os';
 import path from 'node:path';
 import { audit, fmt } from './audit-core.js';
 
-const USAGE = 'usage: node audit.js [--project DIR | --all-projects] [--session ID]... [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--tz local|utc] [--top N] [--json]';
-
-function parseArgs(argv) {
-  const a = { top: 10, tz: 'local', json: false, sessions: [], allProjects: false };
-  for (let i = 0; i < argv.length; i++) {
-    const v = argv[i];
-    if (v === '--project') a.project = argv[++i];
-    else if (v === '--all-projects') a.allProjects = true;
-    else if (v === '--session') a.sessions.push(String(argv[++i] || ''));
-    else if (v === '--since') a.since = argv[++i];
-    else if (v === '--until') a.until = argv[++i];
-    else if (v === '--tz') a.tz = argv[++i];
-    else if (v === '--top') a.top = Number(argv[++i]);
-    else if (v === '--json') a.json = true;
-    else if (v === '-h' || v === '--help') a.help = true;
-    else a.bad = v;
-  }
-  return a;
-}
+const USAGE = 'usage: node audit.js [--project DIR | --all-projects] [--session ID]... [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--tz local|utc] [--top N] [--by-session] [--compare-at DATETIME] [--json]';
 
 function fail(msg) {
   console.error(msg);
   process.exit(2);
+}
+
+function parseArgs(argv) {
+  const a = { top: 10, tz: 'local', json: false, sessions: [], allProjects: false, bySession: false };
+  for (let i = 0; i < argv.length; i++) {
+    const v = argv[i];
+    // an option's value: present and not the next option
+    const val = () => {
+      const x = argv[++i];
+      if (x === undefined || x === '' || x.startsWith('--')) fail(`${v} needs a value\n${USAGE}`);
+      return x;
+    };
+    if (v === '--project') a.project = val();
+    else if (v === '--all-projects') a.allProjects = true;
+    else if (v === '--session') a.sessions.push(val());
+    else if (v === '--since') a.since = val();
+    else if (v === '--until') a.until = val();
+    else if (v === '--tz') a.tz = val();
+    else if (v === '--top') a.top = Number(val());
+    else if (v === '--by-session') a.bySession = true;
+    else if (v === '--compare-at') a.compareAt = val();
+    else if (v === '--json') a.json = true;
+    else if (v === '-h' || v === '--help') a.help = true;
+    else if (!a.bad) a.bad = v;
+  }
+  return a;
 }
 
 /** Epoch ms of 00:00 of a YYYY-MM-DD day in the given offset, plus `days`. */
@@ -48,6 +62,31 @@ function dayStart(s, tzOffsetMinutes, days = 0) {
   const check = m && new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).toISOString().slice(0, 10);
   if (!m || check !== s) fail(`not a date (YYYY-MM-DD): ${s}`);
   return Date.UTC(+m[1], +m[2] - 1, +m[3] + days) - tzOffsetMinutes * 60000;
+}
+
+/**
+ * Epoch ms of a date or date-time: YYYY-MM-DD, YYYY-MM-DD[T ]HH:MM[:SS[.sss]], optionally
+ * followed by Z or +HH:MM / -HH:MM; without a zone it is read in the given offset.
+ */
+function dateTime(s, tzOffsetMinutes) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3})\d*)?)?)?(Z|[+-]\d{2}:?\d{2})?$/.exec(String(s || ''));
+  if (!m) fail(`not a date-time (YYYY-MM-DDTHH:MM, optionally with Z or +09:00): ${s}`);
+  const [y, mo, d, h = 0, mi = 0, se = 0] = m.slice(1, 7).map((x) => (x === undefined ? undefined : Number(x)));
+  const ms = m[7] ? Number(m[7].padEnd(3, '0')) : 0;
+  const t = Date.UTC(y, mo - 1, d, h, mi, se, ms);
+  const back = new Date(t);
+  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo - 1 || back.getUTCDate() !== d || h > 23 || mi > 59 || se > 59) {
+    fail(`not a date-time (YYYY-MM-DDTHH:MM, optionally with Z or +09:00): ${s}`);
+  }
+  let offset = tzOffsetMinutes;
+  if (m[8] === 'Z') offset = 0;
+  else if (m[8]) {
+    const z = m[8].replace(':', '');
+    const zh = Number(z.slice(1, 3)), zm = Number(z.slice(3, 5));
+    if (zh > 23 || zm > 59) fail(`not a time zone: ${m[8]}`);
+    offset = (z[0] === '-' ? -1 : 1) * (zh * 60 + zm);
+  }
+  return t - offset * 60000;
 }
 
 function readJsonl(file) {
@@ -140,11 +179,14 @@ function locateAgents(agentTypes, cwds, configDir) {
 const args = parseArgs(process.argv.slice(2));
 if (args.help) { console.log(USAGE); process.exit(0); }
 if (args.bad) fail(`unknown argument: ${args.bad}\n${USAGE}`);
-if (!(args.top > 0)) fail('--top takes a positive number');
+if (!(Number.isInteger(args.top) && args.top > 0)) fail('--top takes a positive whole number');
 if (args.tz !== 'local' && args.tz !== 'utc') fail('--tz takes local or utc');
+if (args.project && args.allProjects) fail('use either --project or --all-projects');
 const tzOffsetMinutes = args.tz === 'utc' ? 0 : -new Date().getTimezoneOffset();
 const since = args.since ? dayStart(args.since, tzOffsetMinutes) : undefined;
 const until = args.until ? dayStart(args.until, tzOffsetMinutes, 1) : undefined;
+if (since != null && until != null && until <= since) fail('--until is before --since');
+const compareAt = args.compareAt != null ? dateTime(args.compareAt, tzOffsetMinutes) : undefined;
 
 const configDir = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
 const projectsRoot = path.join(configDir, 'projects');
@@ -172,7 +214,7 @@ if (!sessions.length) fail('no sessions matched');
 
 const agentTypes = new Set(sessions.flatMap((s) => s.subagents.map((a) => (a.meta && a.meta.agentType) || '?')));
 const agentDefs = locateAgents(agentTypes, sessions.map((s) => s.cwd), configDir);
-const r = audit(sessions, { since, until, top: args.top, agentDefs });
+const r = audit(sessions, { since, until, top: args.top, agentDefs, bySession: args.bySession, compareAt });
 
 if (args.json) {
   console.log(JSON.stringify(r, null, 1));
@@ -285,4 +327,31 @@ r.findings.forEach((f, i) => {
   p(`   action: ${f.action}`);
 });
 if (r.omittedFindings) p(`\n(${r.omittedFindings} smaller findings omitted: below 0.5% of the total or past --top)`);
+const num = (x, f = fmt) => (x == null ? '-' : f(x));
+const dayIso = (x) => { const t = Date.parse(x); return Number.isFinite(t) ? day(t) : '-'; };
+if (r.perSession) {
+  p();
+  p('== 10. Per session (requests in range; turns = the person\'s prompts that started a turn in the main thread) ==');
+  p(`${padr('session', 10)}${padr('start', 17)}${pad('reqs', 6)}${pad('turns', 6)}${pad('weighted*', 13)}${pad('w*/turn', 11)}${pad('w*/req', 9)}${pad('hit', 7)}${pad('ctx med', 10)}${pad('ctx max', 10)}${pad('sub', 7)}  findings`);
+  for (const s of r.perSession) {
+    p(`${padr(s.id, 10)}${padr(dayIso(s.start), 17)}${pad(s.requests, 6)}${pad(s.turns, 6)}${pad(fmt(s.weighted), 13)}${pad(num(s.weightedPerTurn), 11)}${pad(num(s.weightedPerRequest), 9)}`
+      + `${pad(pct(s.cacheHitRatio), 7)}${pad(fmt(s.mainContext.median), 10)}${pad(fmt(s.mainContext.max), 10)}${pad(pct(s.subagentShare), 7)}  ${s.findings.map((f) => f.id).join(', ') || '-'}`);
+  }
+}
+if (r.compare) {
+  const c = r.compare;
+  const ratio = (x) => (x == null ? '-' : (x > 0 ? '+' : '') + (100 * x).toFixed(1) + '%');
+  const cell = (k, x) => (x == null ? '-' : /Ratio$|Share$/.test(k) ? pct(x) : fmt(x));
+  const signed = (k, x) => (x == null ? '-' : (x > 0 ? '+' : '') + (/Ratio$|Share$/.test(k) ? (100 * x).toFixed(1) + ' pt' : fmt(x)));
+  p();
+  p(`== 11. Before / after ${dayIso(c.at)} (sessions by their first request in range; median per session) ==`);
+  p(`before: ${c.before.sessions} sessions  after: ${c.after.sessions} sessions` + (c.fewSessions ? '  (fewer than 3 sessions on a side: a rough guide only)' : ''));
+  const row = (k, d) => p(`${padr(k, 34)}${pad(cell(k, d.before), 13)}${pad(cell(k, d.after), 13)}${pad(signed(k, d.change), 13)}${pad(ratio(d.changeRatio), 9)}`);
+  p(`${padr('metric', 34)}${pad('before', 13)}${pad('after', 13)}${pad('change', 13)}${pad('ratio', 9)}`);
+  for (const [k, d] of Object.entries(c.diff)) row(k, d);
+  for (const f of c.byFinding) {
+    p(`[${f.id}]`);
+    for (const [k, d] of Object.entries(f.diff)) row('  ' + k, d);
+  }
+}
 console.log(L.join('\n'));
