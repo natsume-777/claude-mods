@@ -1,5 +1,5 @@
 ---
-name: whiteboard
+name: whiteboard-guide
 description: 利用者が「ボードにこれを書いて」「ボードに残しておいて」「ボードのあれを消して」「ボードを整理して」「ボードに何が書いてある？」「さっきの書き換えを戻して」「◯◯のボードを使って」のようにボード（ホワイトボード）の読み書きやボードの選択を頼んだときに使う。whiteboard のツール（open_board・list_boards・rename_board・set_card・edit_card・append_card・remove_card・clear・list_cards・undo_card）の使い方と、ボードの名前の付け方、カードの id の付け方、1 カード 1 話題、古くなったカードの消し方
 ---
 

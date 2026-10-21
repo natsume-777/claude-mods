@@ -809,7 +809,14 @@ export function register(on, options) {
     for (const [name, tool] of [...Object.entries(tools), ...Object.entries(BOARD_TOOLS)]) {
       await $.tool.register({ name, description: tool.description, inputSchema: tool.inputSchema })
     }
-    await $.command.register({ name: 'whiteboard', description: `${BOARD_NAME}を開く` })
+    // A refused name throws, and a throw would skip the rest of this hook (the board would not load)
+    try {
+      await $.command.register({ name: 'whiteboard', description: `${BOARD_NAME}を開く` })
+    } catch (error) {
+      try {
+        $.ui.log(`whiteboard: コマンド /whiteboard を登録できませんでした: ${messageOf(error)}`, { to: 'debug' })
+      } catch {}
+    }
     try {
       const root = await fixedRoot($)
       await exclusive(() => moveOldBoards($, root))
